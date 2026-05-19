@@ -156,6 +156,11 @@ public class BungeeReceiver implements PluginMessageListener, SettingsDependent 
     }
 
     private boolean verifyHmac(String playerName, long timestamp, UUID verifiedPremiumUuid, String providedHmac) {
+        if (proxySharedSecret.isEmpty()) {
+            logger.warning("Rejected perform.login for " + playerName
+                + ": Hooks.proxySharedSecret is not configured — set the same secret on all backend servers and the proxy");
+            return false;
+        }
         if (Math.abs(System.currentTimeMillis() - timestamp) > MAX_AGE_MILLIS) {
             logger.warning("Rejected perform.login for " + playerName + ": message has expired");
             return false;
