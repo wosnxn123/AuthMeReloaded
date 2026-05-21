@@ -19,7 +19,6 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
-import java.sql.Timestamp;
 import java.util.Base64;
 import java.util.Locale;
 import java.util.regex.Matcher;
@@ -114,8 +113,8 @@ public class NexAuthConverter implements Converter {
                 continue;
             }
 
-            Timestamp joined = rs.getTimestamp("joined");
-            Timestamp lastSeen = rs.getTimestamp("last_seen");
+            long joined = rs.getLong("joined");
+            long lastSeen = rs.getLong("last_seen");
 
             PlayerAuth auth = PlayerAuth.builder()
                 .name(name)
@@ -123,8 +122,8 @@ public class NexAuthConverter implements Converter {
                 .password(password)
                 .lastIp(rs.getString("ip"))
                 .email(rs.getString("email"))
-                .registrationDate(joined != null ? joined.getTime() : 0L)
-                .lastLogin(lastSeen != null ? lastSeen.getTime() : null)
+                .registrationDate(joined > 0 ? joined : 0L)
+                .lastLogin(lastSeen > 0 ? lastSeen : null)
                 .totpKey(rs.getString("secret"))
                 .uuid(UuidUtils.parseUuidSafely(rs.getString("uuid")))
                 .premiumUuid(UuidUtils.parseUuidSafely(rs.getString("premium_uuid")))
