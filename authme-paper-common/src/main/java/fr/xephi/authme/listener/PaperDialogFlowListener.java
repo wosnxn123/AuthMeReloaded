@@ -23,6 +23,7 @@ import fr.xephi.authme.service.ValidationService;
 import fr.xephi.authme.settings.properties.PremiumSettings;
 import fr.xephi.authme.settings.properties.RegistrationSettings;
 import fr.xephi.authme.settings.properties.RestrictionSettings;
+import fr.xephi.authme.util.InternetProtocolUtils;
 import io.papermc.paper.connection.PlayerConfigurationConnection;
 import io.papermc.paper.dialog.Dialog;
 import io.papermc.paper.dialog.DialogResponseView;
@@ -36,6 +37,7 @@ import org.bukkit.Bukkit;
 
 import javax.inject.Inject;
 import java.net.InetSocketAddress;
+import java.util.List;
 import java.util.Locale;
 import java.util.Set;
 import java.util.UUID;
@@ -270,6 +272,22 @@ public class PaperDialogFlowListener implements Listener {
         if (dialogResponseView == null) {
             completeRegisterResponse(playerId, null);
             return;
+        }
+
+        InetSocketAddress clientAddress = connection.getClientAddress();
+        if (clientAddress != null) {
+            String ip = clientAddress.getAddress().getHostAddress();
+            int maxRegPerIp = commonService.getProperty(RestrictionSettings.MAX_REGISTRATION_PER_IP);
+            if (maxRegPerIp > 0 && !InternetProtocolUtils.isLoopbackAddress(ip)) {
+                List<String> otherAccounts = dataSource.getAllAuthsByIp(ip);
+                if (otherAccounts.size() >= maxRegPerIp) {
+                    String kickMessage = messages.retrieveSingle(playerName, MessageKey.MAX_REGISTER_EXCEEDED,
+                        Integer.toString(maxRegPerIp), Integer.toString(otherAccounts.size()),
+                        String.join(", ", otherAccounts));
+                    completeRegisterResponse(playerId, kickMessage);
+                    return;
+                }
+            }
         }
 
         RegistrationType registrationType = commonService.getProperty(RegistrationSettings.REGISTRATION_TYPE);
