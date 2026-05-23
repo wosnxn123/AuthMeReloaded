@@ -291,15 +291,6 @@ final class VelocityProxyBridge {
         }
 
         boolean connectingToAuthServer = configuration.isAuthServer(event.getServer());
-        boolean leavingAuthServer = event.getPreviousServer()
-            .map(configuration::isAuthServer).orElse(false);
-        logger.debug("autoLogin check for {}: connectingToAuth={}, leavingAuth={}", playerName,
-            connectingToAuthServer, leavingAuthServer);
-
-        if (!connectingToAuthServer && !leavingAuthServer) {
-            logger.debug("Skipping auto-login for {} — server transition not involving an auth server", playerName);
-            return;
-        }
 
         String normalizedName = normalizeName(playerName);
 

@@ -326,7 +326,19 @@ class VelocityProxyBridgeTest {
     }
 
     @Test
-    void shouldNotForwardPerformLoginToNonAuthServers() {
+    void shouldNotForwardPerformLoginForUnauthenticatedPlayer() {
+        given(player.getUsername()).willReturn("Alice");
+        given(nonAuthServer.getServerInfo()).willReturn(nonAuthServerInfo);
+        given(nonAuthServerInfo.getName()).willReturn("survival");
+
+        VelocityProxyBridge bridge = new VelocityProxyBridge(proxyServer, logger, createConfiguration(), new VelocityAuthenticationStore());
+        bridge.onServerConnected(new ServerConnectedEvent(player, nonAuthServer, null));
+
+        verify(currentServer, never()).sendPluginMessage(any(), any(byte[].class));
+    }
+
+    @Test
+    void shouldForwardPerformLoginWhenSwitchingFromAuthServerToNonAuthServer() {
         given(pluginMessageEvent.getResult()).willReturn(PluginMessageEvent.ForwardResult.forward());
         given(pluginMessageEvent.getIdentifier()).willReturn(VelocityProxyBridge.AUTHME_CHANNEL);
         given(pluginMessageEvent.getSource()).willReturn(sourceConnection);
@@ -336,12 +348,18 @@ class VelocityProxyBridgeTest {
         given(authServerInfo.getName()).willReturn("lobby");
         given(nonAuthServer.getServerInfo()).willReturn(nonAuthServerInfo);
         given(nonAuthServerInfo.getName()).willReturn("survival");
+        given(player.getUsername()).willReturn("Alice");
+        given(player.getCurrentServer()).willReturn(Optional.of(currentServer));
+        given(currentServer.getServer()).willReturn(nonAuthServer);
+        given(currentServer.sendPluginMessage(eq(VelocityProxyBridge.AUTHME_CHANNEL), any(byte[].class)))
+            .willReturn(true);
 
         VelocityProxyBridge bridge = new VelocityProxyBridge(proxyServer, logger, createConfiguration(), new VelocityAuthenticationStore());
         bridge.onPluginMessage(pluginMessageEvent);
-        bridge.onServerConnected(new ServerConnectedEvent(player, nonAuthServer, null));
+        bridge.onServerConnected(new ServerConnectedEvent(player, nonAuthServer, authServer));
 
-        verify(currentServer, never()).sendPluginMessage(any(), any(byte[].class));
+        verify(currentServer).sendPluginMessage(eq(VelocityProxyBridge.AUTHME_CHANNEL), payloadCaptor.capture());
+        assertPerformLoginPayload(payloadCaptor.getValue(), "alice", "test-secret");
     }
 
     // --- Command blocking tests ---
