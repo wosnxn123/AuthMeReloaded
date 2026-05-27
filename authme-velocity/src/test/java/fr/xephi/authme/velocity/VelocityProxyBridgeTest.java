@@ -333,7 +333,7 @@ class VelocityProxyBridgeTest {
         given(nonAuthServer.getServerInfo()).willReturn(nonAuthServerInfo);
         given(nonAuthServerInfo.getName()).willReturn("survival");
 
-        VelocityProxyBridge bridge = new VelocityProxyBridge(proxyServer, logger, createConfiguration(), new VelocityAuthenticationStore());
+        VelocityProxyBridge bridge = new VelocityProxyBridge(proxyServer, logger, createConfiguration(), new VelocityAuthenticationStore(), null);
         bridge.onServerConnected(new ServerConnectedEvent(player, nonAuthServer, null));
 
         verify(currentServer, never()).sendPluginMessage(any(), any(byte[].class));
