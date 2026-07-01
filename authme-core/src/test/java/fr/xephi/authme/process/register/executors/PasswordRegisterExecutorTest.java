@@ -22,7 +22,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 
 import static fr.xephi.authme.AuthMeMatchers.equalToHash;
 import static fr.xephi.authme.AuthMeMatchers.hasAuthBasicData;
-import static fr.xephi.authme.service.BukkitServiceTestHelper.setBukkitServiceToScheduleSyncDelayedTaskWithDelay;
+import static fr.xephi.authme.service.BukkitServiceTestHelper.setBukkitServiceToScheduleSyncDelayedTaskWithEntityAndDelay;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.greaterThan;
@@ -117,7 +117,7 @@ class PasswordRegisterExecutorTest {
         given(commonService.getProperty(PluginSettings.USE_ASYNC_TASKS)).willReturn(false);
         Player player = mock(Player.class);
         PasswordRegisterParams params = PasswordRegisterParams.of(player, "pass", "mail@example.org");
-        setBukkitServiceToScheduleSyncDelayedTaskWithDelay(bukkitService);
+        setBukkitServiceToScheduleSyncDelayedTaskWithEntityAndDelay(bukkitService);
 
         // when
         executor.executePostPersistAction(params);

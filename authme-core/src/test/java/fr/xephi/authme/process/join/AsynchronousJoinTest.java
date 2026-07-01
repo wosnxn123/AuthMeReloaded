@@ -46,7 +46,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static fr.xephi.authme.service.BukkitServiceTestHelper.setBukkitServiceToRunTaskLater;
 import static fr.xephi.authme.service.BukkitServiceTestHelper.setBukkitServiceToRunTaskOptionallyAsync;
-import static fr.xephi.authme.service.BukkitServiceTestHelper.setBukkitServiceToScheduleSyncTaskFromOptionallyAsyncTask;
+import static fr.xephi.authme.service.BukkitServiceTestHelper.setBukkitServiceToScheduleSyncEntityTaskFromOptionallyAsyncTask;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.BDDMockito.given;
@@ -114,7 +114,7 @@ public class AsynchronousJoinTest {
 
     @BeforeEach
     public void setUp() {
-        setBukkitServiceToScheduleSyncTaskFromOptionallyAsyncTask(bukkitService);
+        setBukkitServiceToScheduleSyncEntityTaskFromOptionallyAsyncTask(bukkitService);
         setBukkitServiceToRunTaskOptionallyAsync(bukkitService);
         setBukkitServiceToRunTaskLater(bukkitService);
         given(service.getProperty(PremiumSettings.ENABLE_PREMIUM)).willReturn(false);
