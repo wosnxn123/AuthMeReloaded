@@ -189,6 +189,14 @@ public class AsynchronousJoin implements AsynchronousProcess {
 
         boolean isAuthAvailable = database.isAuthAvailable(name);
 
+        // Pre-join registration race fix: when a pending registration exists from the pre-join dialog,
+        // the DB write hasn't happened yet so isAuthAvailable is false. But registration is about to
+        // execute in processJoinSync. Treat the player as registered to avoid showing register prompts
+        // (MessageTask "please register", post-join register dialog) before the async registration completes.
+        if (!isAuthAvailable && pendingRegistration != null) {
+            isAuthAvailable = true;
+        }
+
         if (isAuthAvailable) {
             // Protect inventory
             if (service.getProperty(PROTECT_INVENTORY_BEFORE_LOGIN)) {
