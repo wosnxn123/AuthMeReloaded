@@ -48,6 +48,7 @@ abstract class AbstractPasswordRegisterExecutor<P extends AbstractPasswordRegist
     @Inject
     private AsynchronousLogin asynchronousLogin;
 
+
     @Override
     public boolean isRegistrationAdmitted(P params) {
         ValidationService.ValidationResult passwordValidation = validationService.validatePassword(
@@ -63,7 +64,9 @@ abstract class AbstractPasswordRegisterExecutor<P extends AbstractPasswordRegist
     public PlayerAuth buildPlayerAuth(P params) {
         HashedPassword hashedPassword = passwordSecurity.computeHash(params.getPassword(), params.getPlayerName());
         params.setHashedPassword(hashedPassword);
-        return createPlayerAuthObject(params);
+        PlayerAuth auth = createPlayerAuthObject(params);
+        params.setSavedAuth(auth);
+        return auth;
     }
 
     /**
@@ -88,11 +91,17 @@ abstract class AbstractPasswordRegisterExecutor<P extends AbstractPasswordRegist
     public void executePostPersistAction(P params) {
         final Player player = params.getPlayer();
         if (performLoginAfterRegister(params)) {
+            // Use the PlayerAuth already in memory instead of re-querying the database.
+            // On Folia (async), the SQLite write from saveAuth may not be visible to another
+            // thread immediately, so dataSource.getAuth() would return null inside forceLogin,
+            // causing UNKNOWN_USER + resetMessageTask(REGISTER) -> register prompt loop.
             if (commonService.getProperty(PluginSettings.USE_ASYNC_TASKS)) {
-                bukkitService.runTaskAsynchronously(() -> asynchronousLogin.forceLogin(player));
+                final PlayerAuth auth = params.getSavedAuth();
+                bukkitService.runTaskAsynchronously(() -> asynchronousLogin.forceLogin(player, auth));
             } else {
+                final PlayerAuth auth = params.getSavedAuth();
                 bukkitService.scheduleSyncDelayedTask(player,
-                    () -> asynchronousLogin.forceLogin(player), SYNC_LOGIN_DELAY);
+                    () -> asynchronousLogin.forceLogin(player, auth), SYNC_LOGIN_DELAY);
             }
         }
         syncProcessManager.processSyncPasswordRegister(player);

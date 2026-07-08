@@ -1,5 +1,6 @@
 package fr.xephi.authme.process.register.executors;
 
+import fr.xephi.authme.data.auth.PlayerAuth;
 import fr.xephi.authme.security.crypts.HashedPassword;
 import org.bukkit.entity.Player;
 
@@ -12,6 +13,7 @@ public abstract class AbstractPasswordRegisterParams extends RegistrationParamet
 
     private final String password;
     private HashedPassword hashedPassword;
+    private PlayerAuth savedAuth;
 
     /**
      * Constructor.
@@ -44,5 +46,13 @@ public abstract class AbstractPasswordRegisterParams extends RegistrationParamet
 
     HashedPassword getHashedPassword() {
         return hashedPassword;
+    }
+
+    void setSavedAuth(PlayerAuth savedAuth) {
+        this.savedAuth = savedAuth;
+    }
+
+    PlayerAuth getSavedAuth() {
+        return savedAuth;
     }
 }
