@@ -134,6 +134,46 @@ public class AsynchronousLogin implements AsynchronousProcess {
     }
 
     /**
+     * Logs a player in without requiring a password, using a pre-fetched auth object.
+     * Used after registration where the PlayerAuth is already in memory and a fresh
+     * database query may not yet return the just-saved record (async DB visibility).
+     *
+     * @param player the player to log in
+     * @param auth the PlayerAuth object from registration, must not be null
+     */
+    public void forceLogin(Player player, PlayerAuth auth) {
+        String name = player.getName().toLowerCase(Locale.ROOT);
+        if (playerCache.isAuthenticated(name)) {
+            service.send(player, MessageKey.ALREADY_LOGGED_IN_ERROR);
+            return;
+        }
+
+        // auth is already in memory from registration, skip dataSource.getAuth() which may
+        // not yet return the just-saved record on Folia's async threads.
+
+        if (!service.getProperty(DatabaseSettings.MYSQL_COL_GROUP).isEmpty()
+            && auth.getGroupId() == service.getProperty(HooksSettings.NON_ACTIVATED_USERS_GROUP)) {
+            service.send(player, MessageKey.ACCOUNT_NOT_ACTIVATED);
+            return;
+        }
+
+        String ip = PlayerUtils.getPlayerIp(player);
+        if (hasReachedMaxLoggedInPlayersForIp(player, ip)) {
+            service.send(player, MessageKey.ALREADY_LOGGED_IN_ERROR);
+            return;
+        }
+
+        boolean isAsync = service.getProperty(PluginSettings.USE_ASYNC_TASKS);
+        AuthMeAsyncPreLoginEvent event = new AuthMeAsyncPreLoginEvent(player, isAsync);
+        bukkitService.callEvent(event);
+        if (!event.canLogin()) {
+            return;
+        }
+
+        performLogin(player, auth);
+    }
+
+    /**
      * Logs a player in without requiring a password, initiated by the proxy.
      * Suppresses pre-condition messages and skips the BungeeCord server redirect
      * (the proxy manages routing).

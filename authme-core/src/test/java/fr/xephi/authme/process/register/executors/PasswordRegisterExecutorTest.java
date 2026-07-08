@@ -30,6 +30,8 @@ import static org.hamcrest.Matchers.greaterThan;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.BDDMockito.given;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
@@ -120,13 +122,17 @@ public class PasswordRegisterExecutorTest {
         given(commonService.getProperty(PluginSettings.USE_ASYNC_TASKS)).willReturn(false);
         Player player = mock(Player.class);
         PasswordRegisterParams params = PasswordRegisterParams.of(player, "pass", "mail@example.org");
+        // buildPlayerAuth must run first to populate params.getSavedAuth()
+        given(passwordSecurity.computeHash(anyString(), anyString())).willAnswer(
+            invocation -> new HashedPassword(invocation.getArgument(0)));
+        executor.buildPlayerAuth(params);
         setBukkitServiceToScheduleSyncDelayedTaskWithDelay(bukkitService);
 
         // when
         executor.executePostPersistAction(params);
 
         // then
-        verify(asynchronousLogin).forceLogin(player);
+        verify(asynchronousLogin).forceLogin(eq(player), any(PlayerAuth.class));
         verify(syncProcessManager).processSyncPasswordRegister(player);
     }
 
