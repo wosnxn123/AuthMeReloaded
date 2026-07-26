@@ -159,7 +159,9 @@ public class PremiumVerificationPacketListener extends PacketListenerAbstract {
         // Step 3: Async — verify the token and call Mojang's hasJoined endpoint.
         loginVerifier.completeVerification(connectionKey, sharedSecret, encVerifyToken)
             .thenAccept(maybeUuid -> {
-                maybeUuid.ifPresent(uuid -> loginVerifier.storeVerified(username, uuid));
+                // Bind the verified session to this connection: the backend gate only accepts a
+                // session proved by the same ip:port, so another client cannot inherit it.
+                maybeUuid.ifPresent(uuid -> loginVerifier.storeVerified(connectionKey, username, uuid));
                 resumeLogin(user, username, clientVersion, playerUUID);
             })
             .exceptionally(ex -> {

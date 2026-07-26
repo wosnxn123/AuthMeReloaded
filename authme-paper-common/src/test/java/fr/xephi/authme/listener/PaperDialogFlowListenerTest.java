@@ -416,7 +416,7 @@ public class PaperDialogFlowListenerTest {
         given(proxySessionManager.shouldResumeSession("bobby")).willReturn(false);
         given(sessionService.hasValidSession("bobby", null)).willReturn(false);
         given(dataSource.getAuth("bobby")).willReturn(auth);
-        given(premiumLoginVerifier.getVerifiedUuid("Bobby")).willReturn(premiumUuid);
+        given(premiumLoginVerifier.peekVerifiedUuid("Bobby")).willReturn(premiumUuid);
 
         PlayerProfile profile = mock(PlayerProfile.class);
         given(profile.getId()).willReturn(playerId);
@@ -464,7 +464,7 @@ public class PaperDialogFlowListenerTest {
 
         given(commonService.getProperty(PremiumSettings.ENABLE_PREMIUM)).willReturn(true);
         given(dataSource.getAuth("bobby")).willReturn(auth);
-        given(premiumLoginVerifier.getVerifiedUuid("Bobby")).willReturn(null);  // not yet verified
+        given(premiumLoginVerifier.peekVerifiedUuid("Bobby")).willReturn(null);  // not yet verified
 
         // UUID v4 that doesn't match stored premium UUID → must return false (impostor or wrong account)
         assertThat(invokeShouldSkipPreJoinDialogForPremium(listener, auth, "Bobby", playerId), is(false));
@@ -492,7 +492,7 @@ public class PaperDialogFlowListenerTest {
             .build();
 
         given(commonService.getProperty(PremiumSettings.ENABLE_PREMIUM)).willReturn(true);
-        given(premiumLoginVerifier.getVerifiedUuid("Bobby")).willReturn(null); // PacketEvents not active
+        given(premiumLoginVerifier.peekVerifiedUuid("Bobby")).willReturn(null); // PacketEvents not active
 
         assertThat(invokeShouldSkipPreJoinDialogForPremium(listener, auth, "Bobby", offlineUuid), is(true));
     }

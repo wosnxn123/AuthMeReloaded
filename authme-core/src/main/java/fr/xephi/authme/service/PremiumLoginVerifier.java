@@ -159,19 +159,76 @@ public class PremiumLoginVerifier {
     }
 
     /**
-     * Stores a successfully verified Mojang UUID for the given username.
-     * Retrieved later by {@link #getVerifiedUuid} during the join flow.
+     * Stores a successfully verified Mojang UUID, bound to the connection that proved it.
+     *
+     * <p>Backend (no-proxy) callers MUST use this overload. Binding the session to the connection is
+     * what stops another client from reusing it — see
+     * {@link #consumeVerifiedUuidForConnection(String, String)}.
+     *
+     * @param connectionKey the {@code ip:port} of the connection that completed the handshake
      */
-    public void storeVerified(String username, UUID mojangUuid) {
+    public void storeVerified(String connectionKey, String username, UUID mojangUuid) {
         verified.put(username.toLowerCase(Locale.ROOT),
-            new VerifiedSession(mojangUuid, System.currentTimeMillis()));
+            new VerifiedSession(mojangUuid, System.currentTimeMillis(), connectionKey));
     }
 
     /**
-     * Returns the Mojang-confirmed UUID for the given username if a valid (non-expired) verified
-     * session exists, or {@code null} otherwise.
+     * Proxy-side variant: stores a verified session with no backend connection bound to it.
+     *
+     * <p>Only for the BungeeCord/Velocity modules, which run in the proxy JVM and have no backend
+     * {@code ip:port}. The backend's own authentication gate rejects premium auto-login outright when
+     * a proxy is configured (see {@code AsynchronousJoin#canBypassWithPremium}), so an unbound
+     * session can never authenticate a backend join.
      */
-    public UUID getVerifiedUuid(String username) {
+    public void storeVerified(String username, UUID mojangUuid) {
+        verified.put(username.toLowerCase(Locale.ROOT),
+            new VerifiedSession(mojangUuid, System.currentTimeMillis(), null));
+    }
+
+    /**
+     * Authentication gate: returns the Mojang-confirmed UUID only if the verified session was proved
+     * by <b>this very connection</b>, then consumes it so it cannot be replayed.
+     *
+     * <p>This is the only lookup that may be used to grant a passwordless premium login. The
+     * name-keyed {@link #peekVerifiedUuid(String)} must never be used for that: sessions live for
+     * {@link #VERIFIED_TTL_MS} and a cracked client can connect under any name it likes, so a
+     * name-only match would let it inherit a genuine player's verification.
+     *
+     * @param connectionKey the joining player's {@code ip:port}, in the same form the handshake used
+     * @param username      the joining player's name
+     * @return the verified Mojang UUID, or {@code null} if there is none for this exact connection
+     */
+    public UUID consumeVerifiedUuidForConnection(String connectionKey, String username) {
+        if (connectionKey == null) {
+            return null;
+        }
+        String key = username.toLowerCase(Locale.ROOT);
+        VerifiedSession session = verified.get(key);
+        if (session == null) {
+            return null;
+        }
+        if (System.currentTimeMillis() - session.verifiedAt() > VERIFIED_TTL_MS) {
+            verified.remove(key);
+            return null;
+        }
+        if (!connectionKey.equals(session.connectionKey())) {
+            logger.warning("Rejected premium auto-login for '" + username
+                + "': a verified session exists but was proved by a different connection"
+                + " (expected " + session.connectionKey() + ", got " + connectionKey + ")");
+            return null;
+        }
+        verified.remove(key);
+        return session.mojangUuid();
+    }
+
+    /**
+     * Non-consuming, name-only lookup. <b>Not an authentication gate</b> — see
+     * {@link #consumeVerifiedUuidForConnection(String, String)}.
+     *
+     * <p>Intended only for advisory decisions that are re-checked by the real gate afterwards, such
+     * as whether to skip the pre-join dialog, and for the proxy modules' own flows.
+     */
+    public UUID peekVerifiedUuid(String username) {
         String key = username.toLowerCase(Locale.ROOT);
         VerifiedSession session = verified.get(key);
         if (session == null) {
@@ -205,5 +262,9 @@ public class PremiumLoginVerifier {
 
     record PendingVerification(String username, UUID playerUUID, byte[] verifyToken, long startedAt) {}
 
-    record VerifiedSession(UUID mojangUuid, long verifiedAt) {}
+    /**
+     * @param connectionKey the {@code ip:port} of the connection that completed the handshake, or
+     *                      {@code null} for proxy-side sessions where no backend connection exists
+     */
+    record VerifiedSession(UUID mojangUuid, long verifiedAt, String connectionKey) {}
 }

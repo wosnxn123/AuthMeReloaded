@@ -489,7 +489,8 @@ public class AsynchronousJoin implements AsynchronousProcess {
                 if (pendingUuid == null) {
                     return false;
                 }
-                UUID verified = premiumLoginVerifier.getVerifiedUuid(name);
+                UUID verified = premiumLoginVerifier
+                    .consumeVerifiedUuidForConnection(connectionKeyOf(player), name);
                 UUID confirmedUuid = (verified != null && verified.equals(pendingUuid)) ? verified : null;
                 pendingPremiumCache.removePending(name);
                 if (confirmedUuid != null) {
@@ -513,8 +514,31 @@ public class AsynchronousJoin implements AsynchronousProcess {
             return false;
         }
         // UUID v3 = Bukkit offline UUID: require cryptographic session verification via PacketEvents.
-        UUID verifiedUuid = premiumLoginVerifier.getVerifiedUuid(name);
+        // The session must have been proved by THIS connection. A name-only match would be an
+        // authentication bypass: verified sessions live for a minute, so a cracked client joining
+        // under a premium player's name within that window would inherit their verification and be
+        // logged in without a password.
+        UUID verifiedUuid = premiumLoginVerifier
+            .consumeVerifiedUuidForConnection(connectionKeyOf(player), name);
         return verifiedUuid != null && verifiedUuid.equals(auth.getPremiumUuid());
+    }
+
+    /**
+     * Builds the {@code ip:port} key identifying this player's connection, in the same form
+     * {@code PremiumVerificationPacketListener} uses during the encryption handshake. It is the same
+     * TCP connection throughout login and play, so the remote port matches.
+     *
+     * @return the key, or {@code null} if the address is unavailable (then premium auto-login is
+     *         refused and the player logs in with a password, which is the safe direction)
+     */
+    private String connectionKeyOf(Player player) {
+        java.net.InetSocketAddress addr = player.getAddress();
+        if (addr == null || addr.getAddress() == null) {
+            logger.warning("No remote address for '" + player.getName()
+                + "'; refusing premium auto-login and requiring a password");
+            return null;
+        }
+        return addr.getAddress().getHostAddress() + ":" + addr.getPort();
     }
 
     private int countOnlinePlayersByIp(String ip) {

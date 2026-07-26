@@ -399,7 +399,11 @@ public class PaperDialogFlowListener implements Listener {
             return playerId.equals(auth.getPremiumUuid());
         }
         // UUID v3 (offline): check if PacketEvents has already completed verification.
-        UUID verifiedUuid = premiumLoginVerifier.getVerifiedUuid(playerName);
+        // Advisory only - this decides whether to show the pre-join dialog, and
+        // AsynchronousJoin.canBypassWithPremium() is the actual authentication gate (it requires the
+        // verified session to belong to this connection). Hence peek, not consume: consuming here
+        // would strip the session before the real gate could check it.
+        UUID verifiedUuid = premiumLoginVerifier.peekVerifiedUuid(playerName);
         if (verifiedUuid != null) {
             return verifiedUuid.equals(auth.getPremiumUuid());
         }

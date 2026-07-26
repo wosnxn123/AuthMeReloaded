@@ -59,6 +59,11 @@ public final class BungeePremiumVerificationManager {
     }
 
     public UUID getVerifiedPremiumUuid(String normalizedName) {
+        // ProxyPremiumLoginVerifier is the proxy module's own class, separate from core's
+        // PremiumLoginVerifier. Sessions here belong to the proxy's own login flow and the backend
+        // refuses premium auto-login outright when a proxy is configured, so a name-only lookup is
+        // correct here. Do not copy this pattern into a backend authentication path - there it must
+        // be bound to the connection (see PremiumLoginVerifier#consumeVerifiedUuidForConnection).
         return loginVerifier.getVerifiedUuid(normalizedName);
     }
 
