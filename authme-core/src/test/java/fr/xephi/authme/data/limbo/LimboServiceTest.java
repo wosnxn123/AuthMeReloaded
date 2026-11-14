@@ -4,6 +4,7 @@ import fr.xephi.authme.ReflectionTestUtils;
 import fr.xephi.authme.TestHelper;
 import fr.xephi.authme.data.limbo.persistence.LimboPersistence;
 import fr.xephi.authme.permission.PermissionsManager;
+import fr.xephi.authme.service.BukkitService;
 import fr.xephi.authme.service.TeleportationService;
 import fr.xephi.authme.settings.Settings;
 import fr.xephi.authme.settings.SpawnLoader;
@@ -20,11 +21,13 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.Mockito;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import java.nio.charset.StandardCharsets;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Map;
@@ -37,11 +40,13 @@ import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.nullValue;
 import static org.hamcrest.Matchers.sameInstance;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.BDDMockito.given;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.only;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -79,6 +84,9 @@ class LimboServiceTest {
     @Mock
     private TeleportationService teleportationService;
 
+    @Mock
+    private BukkitService bukkitService;
+
     @BeforeAll
     public static void initLogger() {
         TestHelper.setupLogger();
@@ -112,8 +120,8 @@ class LimboServiceTest {
         verify(player).setFlySpeed(0.0f);
         verify(player).setWalkSpeed(0.0f);
 
-        assertThat(limboService.hasLimboPlayer("Bobby"), equalTo(true));
-        LimboPlayer limbo = limboService.getLimboPlayer("Bobby");
+        assertThat(limboService.hasLimboPlayer(player), equalTo(true));
+        LimboPlayer limbo = limboService.getLimboPlayer(player);
         verify(authGroupHandler).setGroup(player, limbo, AuthGroupType.REGISTERED_UNAUTHENTICATED);
         assertThat(limbo, not(nullValue()));
         assertThat(limbo.isOperator(), equalTo(true));
@@ -147,7 +155,7 @@ class LimboServiceTest {
         verify(player).setFlySpeed(0.0f);
         verify(player).setWalkSpeed(0.0f);
 
-        LimboPlayer limbo = limboService.getLimboPlayer("charles");
+        LimboPlayer limbo = limboService.getLimboPlayer(player);
         verify(authGroupHandler).setGroup(player, limbo, AuthGroupType.UNREGISTERED);
         assertThat(limbo, not(nullValue()));
         assertThat(limbo.isOperator(), equalTo(false));
@@ -159,11 +167,46 @@ class LimboServiceTest {
     }
 
     @Test
+    void shouldNotRestoreOpStatusFromDiskLimboForUnregisteredPlayer() {
+        // given
+        Player player = newPlayer("Purged", false, 0.2f, false, 0.1f);
+        LimboPlayer diskLimbo = new LimboPlayer(null, true, Collections.emptyList(), false, 0.2f, 0.1f);
+        given(limboPersistence.getLimboPlayer(player)).willReturn(diskLimbo);
+        given(spawnLoader.getPlayerLocationOrSpawn(player)).willReturn(mock(Location.class));
+        given(permissionsManager.hasGroupSupport()).willReturn(false);
+        given(settings.getProperty(LimboSettings.RESTORE_ALLOW_FLIGHT)).willReturn(AllowFlightRestoreType.RESTORE);
+        given(settings.getProperty(RestrictionSettings.ALLOW_UNAUTHED_MOVEMENT)).willReturn(false);
+        given(teleportationService.consumeOriginalJoinLocation(anyString(), any(Location.class)))
+            .willAnswer(invocation -> invocation.getArgument(1));
+
+        // when
+        limboService.createLimboPlayer(player, false);
+
+        // then
+        assertThat(limboService.getLimboPlayer(player).isOperator(), equalTo(false));
+    }
+
+    @Test
+    void shouldNotStoreOpStatusWhenSavingStateOfAuthenticatedPlayer() {
+        // given
+        Player player = newPlayer("Rider", true, 0.2f, false, 0.1f);
+        given(limboPersistence.getLimboPlayer(player)).willReturn(null);
+
+        // when
+        limboService.saveVehicleForPlayer(player, UUID.randomUUID(), EntityType.BOAT);
+
+        // then
+        ArgumentCaptor<LimboPlayer> captor = ArgumentCaptor.forClass(LimboPlayer.class);
+        verify(limboPersistence).saveLimboPlayer(eq(player), captor.capture());
+        assertThat(captor.getValue().isOperator(), equalTo(false));
+    }
+
+    @Test
     void shouldClearTasksOnAlreadyExistingLimbo() {
         // given
         LimboPlayer existingLimbo = mock(LimboPlayer.class);
-        getLimboMap().put("carlos", existingLimbo);
         Player player = newPlayer("Carlos");
+        getLimboMap().put(player.getUniqueId(), existingLimbo);
         given(settings.getProperty(LimboSettings.RESTORE_ALLOW_FLIGHT)).willReturn(AllowFlightRestoreType.ENABLE);
         given(settings.getProperty(RestrictionSettings.ALLOW_UNAUTHED_MOVEMENT)).willReturn(false);
 
@@ -172,10 +215,36 @@ class LimboServiceTest {
 
         // then
         verify(existingLimbo).clearTasks();
-        LimboPlayer newLimbo = limboService.getLimboPlayer("Carlos");
+        LimboPlayer newLimbo = limboService.getLimboPlayer(player);
         verify(authGroupHandler).setGroup(player, newLimbo, AuthGroupType.UNREGISTERED);
         assertThat(newLimbo, not(nullValue()));
         assertThat(newLimbo, not(sameInstance(existingLimbo)));
+    }
+
+    @Test
+    void shouldKeepLimboPlayersOfOtherCaseOfNameApart() {
+        // given
+        Player admin = newPlayer("Admin", false, 0.2f, false, 0.1f);
+        LimboPlayer adminLimbo = Mockito.spy(new LimboPlayer(null, true,
+            Collections.singletonList(new UserGroup("admins")), false, 0.2f, 0.1f));
+        getLimboMap().put(admin.getUniqueId(), adminLimbo);
+        Player impostor = newPlayer("admin", false, 0.2f, false, 0.1f);
+        given(settings.getProperty(LimboSettings.RESTORE_ALLOW_FLIGHT)).willReturn(AllowFlightRestoreType.ENABLE);
+        given(settings.getProperty(RestrictionSettings.ALLOW_UNAUTHED_MOVEMENT)).willReturn(false);
+        given(settings.getProperty(LimboSettings.RESTORE_WALK_SPEED)).willReturn(WalkFlySpeedRestoreType.RESTORE);
+        given(settings.getProperty(LimboSettings.RESTORE_FLY_SPEED)).willReturn(WalkFlySpeedRestoreType.RESTORE);
+
+        // when
+        limboService.createLimboPlayer(impostor, true);
+        limboService.restoreData(impostor);
+        limboService.restoreData(admin);
+
+        // then
+        verify(adminLimbo).clearTasks();
+        verify(impostor, never()).setOp(true);
+        verify(authGroupHandler, never()).setGroup(impostor, adminLimbo, AuthGroupType.LOGGED_IN);
+        verify(admin).setOp(true);
+        verify(authGroupHandler).setGroup(admin, adminLimbo, AuthGroupType.LOGGED_IN);
     }
 
     @Test
@@ -195,7 +264,93 @@ class LimboServiceTest {
         limboService.createLimboPlayer(player, true);
 
         // then
-        assertThat(limboService.getLimboPlayer("Bobby").getLocation(), equalTo(rememberedJoinLocation));
+        assertThat(limboService.getLimboPlayer(player).getLocation(), equalTo(rememberedJoinLocation));
+    }
+
+    @Test
+    void shouldRevokeOperatorOnJoinAndKeepItInLimboOfRegisteredPlayer() {
+        // given
+        Player player = newPlayer("Bobby", true, 0.2f, false, 0.1f);
+        given(player.isOp()).willReturn(true, false);
+        given(spawnLoader.getPlayerLocationOrSpawn(player)).willReturn(mock(Location.class));
+        given(settings.getProperty(LimboSettings.RESTORE_ALLOW_FLIGHT)).willReturn(AllowFlightRestoreType.ENABLE);
+        given(settings.getProperty(RestrictionSettings.ALLOW_UNAUTHED_MOVEMENT)).willReturn(false);
+        given(teleportationService.consumeOriginalJoinLocation(anyString(), any(Location.class)))
+            .willAnswer(invocation -> invocation.getArgument(1));
+
+        // when
+        limboService.revokeOperatorOnJoin(player);
+        limboService.createLimboPlayer(player, true);
+        limboService.restorePendingOperator(player);
+
+        // then
+        assertThat(limboService.getLimboPlayer(player).isOperator(), equalTo(true));
+        verify(player, never()).setOp(true);
+    }
+
+    @Test
+    void shouldNotKeepRevokedOperatorInLimboOfUnregisteredPlayer() {
+        // given
+        Player player = newPlayer("Bobby", true, 0.2f, false, 0.1f);
+        given(player.isOp()).willReturn(true, false);
+        given(spawnLoader.getPlayerLocationOrSpawn(player)).willReturn(mock(Location.class));
+        given(settings.getProperty(LimboSettings.RESTORE_ALLOW_FLIGHT)).willReturn(AllowFlightRestoreType.ENABLE);
+        given(settings.getProperty(RestrictionSettings.ALLOW_UNAUTHED_MOVEMENT)).willReturn(false);
+        given(teleportationService.consumeOriginalJoinLocation(anyString(), any(Location.class)))
+            .willAnswer(invocation -> invocation.getArgument(1));
+
+        // when
+        limboService.revokeOperatorOnJoin(player);
+        limboService.createLimboPlayer(player, false);
+        limboService.restorePendingOperator(player);
+
+        // then
+        assertThat(limboService.getLimboPlayer(player).isOperator(), equalTo(false));
+        verify(player, never()).setOp(true);
+    }
+
+    @Test
+    void shouldRestoreRevokedOperatorOnce() {
+        // given
+        Player player = newPlayer("Bobby", true, 0.2f, false, 0.1f);
+
+        // when
+        limboService.revokeOperatorOnJoin(player);
+        limboService.restorePendingOperator(player);
+        limboService.restorePendingOperator(player);
+
+        // then
+        verify(player).setOp(false);
+        verify(player).setOp(true);
+    }
+
+    @Test
+    void shouldNotRevokeOperatorOfNonOperator() {
+        // given
+        Player player = newPlayer("Bobby", false, 0.2f, false, 0.1f);
+
+        // when
+        limboService.revokeOperatorOnJoin(player);
+        limboService.restorePendingOperator(player);
+
+        // then
+        verify(player, never()).setOp(anyBoolean());
+    }
+
+    @Test
+    void shouldNotRestoreRevokedOperatorToOtherCaseOfName() {
+        // given
+        Player admin = newPlayer("Admin", true, 0.2f, false, 0.1f);
+        Player impostor = newPlayer("admin", false, 0.2f, false, 0.1f);
+
+        // when
+        limboService.revokeOperatorOnJoin(admin);
+        limboService.restorePendingOperator(impostor);
+        limboService.restorePendingOperator(admin);
+
+        // then
+        verify(impostor, never()).setOp(anyBoolean());
+        verify(admin).setOp(true);
     }
 
     @Test
@@ -203,8 +358,8 @@ class LimboServiceTest {
         // given
         LimboPlayer limbo = Mockito.spy(convertToLimboPlayer(
             newPlayer("John", true, 0.4f, false, 0.0f), null, Collections.emptyList()));
-        getLimboMap().put("john", limbo);
         Player player = newPlayer("John", false, 0.2f, false, 0.7f);
+        getLimboMap().put(player.getUniqueId(), limbo);
 
         given(settings.getProperty(LimboSettings.RESTORE_ALLOW_FLIGHT)).willReturn(AllowFlightRestoreType.ENABLE);
         given(settings.getProperty(LimboSettings.RESTORE_WALK_SPEED)).willReturn(WalkFlySpeedRestoreType.RESTORE);
@@ -221,7 +376,7 @@ class LimboServiceTest {
         verify(limbo).clearTasks();
         verify(authGroupHandler).setGroup(player, limbo, AuthGroupType.LOGGED_IN);
         verify(limboPersistence).removeLimboPlayer(player);
-        assertThat(limboService.hasLimboPlayer("John"), equalTo(false));
+        assertThat(limboService.hasLimboPlayer(player), equalTo(false));
     }
 
     @Test
@@ -268,8 +423,8 @@ class LimboServiceTest {
     void shouldReplaceTasks() {
         // given
         LimboPlayer limbo = mock(LimboPlayer.class);
-        getLimboMap().put("jeff", limbo);
         Player player = newPlayer("JEFF");
+        getLimboMap().put(player.getUniqueId(), limbo);
 
 
         // when
@@ -297,10 +452,11 @@ class LimboServiceTest {
         Location pearlLocation = new Location(pearlWorld, 5.0, 64.0, -2.5, 15.0f, 30.0f);
         Vector pearlVelocity = new Vector(0.01, 0.2, -0.03);
         UUID pearlUuid = UUID.nameUUIDFromBytes("missing-pearl".getBytes());
+        given(bukkitService.isOwnedByCurrentThread(pearlLocation)).willReturn(true);
 
         LimboPlayer limbo = new LimboPlayer(null, false, Collections.emptyList(), false, 0.0f, 0.0f);
         limbo.setEnderPearls(Collections.singletonList(new EnderPearlRestoreData(pearlUuid, pearlLocation, pearlVelocity)));
-        getLimboMap().put("pearlie", limbo);
+        getLimboMap().put(player.getUniqueId(), limbo);
 
         given(settings.getProperty(LimboSettings.RECREATE_ENDER_PEARLS)).willReturn(true);
 
@@ -333,12 +489,44 @@ class LimboServiceTest {
 
         LimboPlayer limbo = new LimboPlayer(null, false, Collections.emptyList(), false, 0.0f, 0.0f);
         limbo.setEnderPearls(Collections.singletonList(new EnderPearlRestoreData(pearlUuid, pearlLocation, pearlVelocity)));
-        getLimboMap().put("pearlie", limbo);
+        getLimboMap().put(player.getUniqueId(), limbo);
 
         // when
         limboService.restoreEntities(player);
 
         // then
+        verifyNoInteractions(pearlWorld);
+        assertThat(limbo.getEnderPearls(), hasSize(0));
+    }
+
+    @Test
+    void shouldNotAccessEnderPearlsOfAnotherRegion() {
+        // given
+        Player player = newPlayer("Pearlie");
+        Server server = mock(Server.class);
+        World world = mock(World.class);
+        World pearlWorld = mock(World.class);
+        EnderPearl pearlEntity = mock(EnderPearl.class);
+        given(player.getServer()).willReturn(server);
+        given(server.getWorlds()).willReturn(Collections.singletonList(world));
+        given(world.getEntities()).willReturn(Collections.singletonList(pearlEntity));
+        given(bukkitService.isOwnedByCurrentThread(pearlEntity)).willReturn(false);
+
+        Location pearlLocation = new Location(pearlWorld, 5.0, 64.0, -2.5, 15.0f, 30.0f);
+        given(bukkitService.isOwnedByCurrentThread(pearlLocation)).willReturn(false);
+        UUID pearlUuid = UUID.nameUUIDFromBytes("other-region-pearl".getBytes());
+
+        LimboPlayer limbo = new LimboPlayer(null, false, Collections.emptyList(), false, 0.0f, 0.0f);
+        limbo.setEnderPearls(Collections.singletonList(new EnderPearlRestoreData(pearlUuid, pearlLocation, null)));
+        getLimboMap().put(player.getUniqueId(), limbo);
+
+        given(settings.getProperty(LimboSettings.RECREATE_ENDER_PEARLS)).willReturn(true);
+
+        // when
+        limboService.restoreEntities(player);
+
+        // then
+        verify(pearlEntity, never()).setShooter(any());
         verifyNoInteractions(pearlWorld);
         assertThat(limbo.getEnderPearls(), hasSize(0));
     }
@@ -392,6 +580,7 @@ class LimboServiceTest {
         Location pearlLocation = new Location(pearlWorld, 5.0, 64.0, -2.5, 15.0f, 30.0f);
         Vector pearlVelocity = new Vector(0.01, 0.2, -0.03);
         UUID pearlUuid = UUID.nameUUIDFromBytes("premium-pearl".getBytes());
+        given(bukkitService.isOwnedByCurrentThread(pearlLocation)).willReturn(true);
 
         LimboPlayer diskLimbo = new LimboPlayer(null, false, Collections.emptyList(), false, 0.2f, 0.1f);
         diskLimbo.setEnderPearls(Collections.singletonList(new EnderPearlRestoreData(pearlUuid, pearlLocation, pearlVelocity)));
@@ -445,6 +634,8 @@ class LimboServiceTest {
     private static Player newPlayer(String name) {
         Player player = mock(Player.class);
         lenient().when(player.getName()).thenReturn(name);
+        lenient().when(player.getUniqueId())
+            .thenReturn(UUID.nameUUIDFromBytes(("OfflinePlayer:" + name).getBytes(StandardCharsets.UTF_8)));
         return player;
     }
 
@@ -462,7 +653,7 @@ class LimboServiceTest {
             player.getWalkSpeed(), player.getFlySpeed());
     }
 
-    private Map<String, LimboPlayer> getLimboMap() {
+    private Map<UUID, LimboPlayer> getLimboMap() {
         return ReflectionTestUtils.getFieldValue(LimboService.class, limboService, "entries");
     }
 }

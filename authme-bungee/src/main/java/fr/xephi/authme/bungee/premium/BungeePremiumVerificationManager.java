@@ -9,7 +9,7 @@ import java.util.function.Consumer;
 import java.util.function.Predicate;
 import java.util.logging.Logger;
 
-public final class BungeePremiumVerificationManager {
+public final class BungeePremiumVerificationManager implements PremiumVerificationManager {
 
     private final ProxyServer proxyServer;
     private final Logger logger;
@@ -35,10 +35,12 @@ public final class BungeePremiumVerificationManager {
         this.loginVerifier = new ProxyPremiumLoginVerifier("authme-bungee-premium", this.logger::warning);
     }
 
+    @Override
     public void register() {
         refreshRegistration();
     }
 
+    @Override
     public void refreshRegistration() {
         if (!keepOfflineUuidCompatibility.getAsBoolean()) {
             unregisterPacketListener();
@@ -52,12 +54,14 @@ public final class BungeePremiumVerificationManager {
             return;
         }
         packetListener = new ProxyPremiumVerificationPacketListener(
-            requiresVerification, isPendingVerification, pendingVerificationFailureHandler, loginVerifier, logger::warning);
+            requiresVerification, isPendingVerification, pendingVerificationFailureHandler, loginVerifier,
+            name -> proxyServer.getPlayer(name) != null, logger::warning);
         PacketEvents.getAPI().getEventManager().registerListener(packetListener);
         registered = true;
         logger.info("Registered PacketEvents premium verification on the Bungee proxy");
     }
 
+    @Override
     public UUID getVerifiedPremiumUuid(String normalizedName) {
         // ProxyPremiumLoginVerifier is the proxy module's own class, separate from core's
         // PremiumLoginVerifier. Sessions here belong to the proxy's own login flow and the backend
@@ -67,10 +71,12 @@ public final class BungeePremiumVerificationManager {
         return loginVerifier.getVerifiedUuid(normalizedName);
     }
 
+    @Override
     public void clearVerifiedPremium(String normalizedName) {
         loginVerifier.clearVerified(normalizedName);
     }
 
+    @Override
     public void shutdown() {
         unregisterPacketListener();
         loginVerifier.shutdown();

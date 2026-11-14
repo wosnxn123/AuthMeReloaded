@@ -2,6 +2,7 @@ package fr.xephi.authme.listener;
 
 import fr.xephi.authme.data.QuickCommandsProtectionManager;
 import fr.xephi.authme.data.auth.PlayerAuth;
+import fr.xephi.authme.data.auth.PlayerCache;
 import fr.xephi.authme.data.limbo.EnderPearlRestoreData;
 import fr.xephi.authme.data.limbo.LimboService;
 import fr.xephi.authme.datasource.DataSource;
@@ -12,7 +13,6 @@ import fr.xephi.authme.permission.PlayerStatePermission;
 import fr.xephi.authme.platform.ChatAdapter;
 import fr.xephi.authme.platform.TeleportAdapter;
 import fr.xephi.authme.process.Management;
-import fr.xephi.authme.service.AntiBotService;
 import fr.xephi.authme.service.BukkitService;
 import fr.xephi.authme.service.JoinMessageService;
 import fr.xephi.authme.service.TeleportationService;
@@ -35,6 +35,7 @@ import org.bukkit.event.block.SignChangeEvent;
 import org.bukkit.event.entity.EntityAirChangeEvent;
 import org.bukkit.event.entity.EntityDamageByEntityEvent;
 import org.bukkit.event.inventory.InventoryClickEvent;
+import org.bukkit.event.inventory.InventoryDragEvent;
 import org.bukkit.event.inventory.InventoryOpenEvent;
 import org.bukkit.event.player.AsyncPlayerChatEvent;
 import org.bukkit.event.player.AsyncPlayerPreLoginEvent;
@@ -51,11 +52,14 @@ import org.bukkit.event.player.PlayerItemHeldEvent;
 import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.event.player.PlayerKickEvent;
 import org.bukkit.event.player.PlayerMoveEvent;
+import org.bukkit.event.player.PlayerPickupArrowEvent;
+import org.bukkit.event.player.PlayerPortalEvent;
 import org.bukkit.event.entity.EntityPickupItemEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.event.player.PlayerRespawnEvent;
 import org.bukkit.event.player.PlayerShearEntityEvent;
 import org.bukkit.event.player.PlayerSwapHandItemsEvent;
+import org.bukkit.event.player.PlayerTeleportEvent;
 import org.bukkit.inventory.InventoryView;
 
 import javax.inject.Inject;
@@ -78,8 +82,6 @@ public class PlayerListener implements Listener {
     private Messages messages;
     @Inject
     private DataSource dataSource;
-    @Inject
-    private AntiBotService antiBotService;
     @Inject
     private Management management;
     @Inject
@@ -106,6 +108,8 @@ public class PlayerListener implements Listener {
     private ChatAdapter chatAdapter;
     @Inject
     private TeleportAdapter teleportAdapter;
+    @Inject
+    private PlayerCache playerCache;
 
     // Lowest priority to apply fast protection checks
     @EventHandler(priority = EventPriority.LOWEST)
@@ -153,6 +157,10 @@ public class PlayerListener implements Listener {
             return;
         }
 
+        if (bukkitService.getPlayerExact(name) == null) {
+            playerCache.removePlayer(name);
+        }
+
         // Slow, blocking checks
         try {
             final PlayerAuth auth = dataSource.getAuth(name);
@@ -167,6 +175,15 @@ public class PlayerListener implements Listener {
         } catch (FailedVerificationException e) {
             event.setKickMessage(messages.retrieveSingle(name, e.getReason(), e.getArgs()));
             event.setLoginResult(AsyncPlayerPreLoginEvent.Result.KICK_OTHER);
+        }
+    }
+
+    @EventHandler(priority = EventPriority.LOWEST)
+    public void onPlayerJoinLowest(PlayerJoinEvent event) {
+        Player player = event.getPlayer();
+        playerCache.removePlayer(player.getName());
+        if (!validationService.isUnrestricted(player.getName())) {
+            limboService.revokeOperatorOnJoin(player);
         }
     }
 
@@ -234,25 +251,30 @@ public class PlayerListener implements Listener {
             }
         }
 
-        if (antiBotService.wasPlayerKicked(player.getName())) {
-            return;
-        }
+        try {
+            // Save in-flight ender pearls and vehicle state to disk so they can be restored on reconnect.
+            // Only authenticated players can throw pearls or ride vehicles, so we skip unauthenticated ones.
+            if (!listenerService.shouldCancelEvent(player)) {
+                saveStateBeforeQuit(player);
+            }
 
-        // Save in-flight ender pearls and vehicle state to disk so they can be restored on reconnect.
-        // Only authenticated players can throw pearls or ride vehicles, so we skip unauthenticated ones.
-        if (!listenerService.shouldCancelEvent(player)) {
-            saveStateBeforeQuit(player);
+            // Restore speed synchronously before the async quit, so the player's
+            // .dat file is saved with the correct speed (not 0.0f).
+            if (limboService.hasLimboPlayer(player)) {
+                limboService.restoreData(player);
+            } else {
+                limboService.restorePendingOperator(player);
+                limboService.restoreSpeedSync(player);
+            }
+        } finally {
+            management.performQuit(player);
         }
-
-        // Restore speed synchronously before the async quit, so the player's
-        // .dat file is saved with the correct speed (not 0.0f).
-        limboService.restoreSpeedSync(player);
-        management.performQuit(player);
     }
 
     private void saveStateBeforeQuit(Player player) {
         Set<EnderPearlRestoreData> pearls = player.getServer().getWorlds().stream()
             .flatMap(world -> world.getEntitiesByClass(EnderPearl.class).stream())
+            .filter(bukkitService::isOwnedByCurrentThread)
             .filter(pearl -> player.equals(pearl.getShooter()))
             .map(pearl -> new EnderPearlRestoreData(pearl.getUniqueId(), pearl.getLocation(), pearl.getVelocity()))
             .collect(Collectors.toSet());
@@ -275,12 +297,6 @@ public class PlayerListener implements Listener {
         if (settings.getProperty(RestrictionSettings.FORCE_SINGLE_SESSION)
             && chatAdapter.getKickReason(event).contains("You logged in from another location")) {
             event.setCancelled(true);
-            return;
-        }
-
-        final Player player = event.getPlayer();
-        if (!antiBotService.wasPlayerKicked(player.getName())) {
-            management.performQuit(player);
         }
     }
 
@@ -387,6 +403,35 @@ public class PlayerListener implements Listener {
         }
     }
 
+    @EventHandler(ignoreCancelled = true, priority = EventPriority.LOWEST)
+    public void onPlayerTeleport(PlayerTeleportEvent event) {
+        if (isBlockedTeleportCause(event.getCause()) && listenerService.shouldCancelEvent(event)) {
+            event.setCancelled(true);
+        }
+    }
+
+    @EventHandler(ignoreCancelled = true, priority = EventPriority.LOWEST)
+    public void onPlayerPortal(PlayerPortalEvent event) {
+        if (listenerService.shouldCancelEvent(event)) {
+            event.setCancelled(true);
+        }
+    }
+
+    private static boolean isBlockedTeleportCause(PlayerTeleportEvent.TeleportCause cause) {
+        switch (cause.name()) {
+            case "ENDER_PEARL":
+            case "CHORUS_FRUIT":
+            case "CONSUMABLE_EFFECT":
+            case "NETHER_PORTAL":
+            case "END_PORTAL":
+            case "END_GATEWAY":
+            case "SPECTATE":
+                return true;
+            default:
+                return false;
+        }
+    }
+
     @EventHandler(ignoreCancelled = true, priority = EventPriority.HIGHEST)
     public void onPlayerRespawn(PlayerRespawnEvent event) {
         Player player = event.getPlayer();
@@ -408,7 +453,7 @@ public class PlayerListener implements Listener {
      * Entity/block interaction events
      */
 
-    @EventHandler(ignoreCancelled = true, priority = EventPriority.LOWEST)
+    @EventHandler(priority = EventPriority.LOWEST)
     public void onPlayerInteract(PlayerInteractEvent event) {
         if (listenerService.shouldCancelEvent(event)) {
             event.setCancelled(true);
@@ -494,6 +539,13 @@ public class PlayerListener implements Listener {
     }
 
     @EventHandler(ignoreCancelled = true, priority = EventPriority.LOWEST)
+    public void onPlayerPickupArrow(PlayerPickupArrowEvent event) {
+        if (listenerService.shouldCancelEvent(event)) {
+            event.setCancelled(true);
+        }
+    }
+
+    @EventHandler(ignoreCancelled = true, priority = EventPriority.LOWEST)
     public void onPlayerDropItem(PlayerDropItemEvent event) {
         if (listenerService.shouldCancelEvent(event)) {
             event.setCancelled(true);
@@ -547,6 +599,14 @@ public class PlayerListener implements Listener {
 
     @EventHandler(ignoreCancelled = true, priority = EventPriority.LOWEST)
     public void onPlayerInventoryClick(InventoryClickEvent event) {
+        if (listenerService.shouldCancelEvent(event.getWhoClicked())
+            && !isInventoryWhitelisted(event.getView())) {
+            event.setCancelled(true);
+        }
+    }
+
+    @EventHandler(ignoreCancelled = true, priority = EventPriority.LOWEST)
+    public void onPlayerInventoryDrag(InventoryDragEvent event) {
         if (listenerService.shouldCancelEvent(event.getWhoClicked())
             && !isInventoryWhitelisted(event.getView())) {
             event.setCancelled(true);

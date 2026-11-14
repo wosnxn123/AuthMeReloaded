@@ -75,6 +75,7 @@ public class PremiumLoginVerifier {
      */
     public byte[] startVerification(String connectionKey, String username, UUID playerUUID) {
         evictStalePendingEntries();
+        verified.remove(username.toLowerCase(Locale.ROOT));
         byte[] verifyToken = new byte[4];
         secureRandom.nextBytes(verifyToken);
         pending.put(connectionKey, new PendingVerification(username, playerUUID, verifyToken, System.currentTimeMillis()));
@@ -208,7 +209,7 @@ public class PremiumLoginVerifier {
             return null;
         }
         if (System.currentTimeMillis() - session.verifiedAt() > VERIFIED_TTL_MS) {
-            verified.remove(key);
+            verified.remove(key, session);
             return null;
         }
         if (!connectionKey.equals(session.connectionKey())) {
@@ -217,8 +218,9 @@ public class PremiumLoginVerifier {
                 + " (expected " + session.connectionKey() + ", got " + connectionKey + ")");
             return null;
         }
-        verified.remove(key);
-        return session.mojangUuid();
+        // Only the conditional-remove winner may authenticate. Concurrent consumers must not
+        // both reuse this proof or remove a newer verification installed for the same name.
+        return verified.remove(key, session) ? session.mojangUuid() : null;
     }
 
     /**
@@ -235,10 +237,19 @@ public class PremiumLoginVerifier {
             return null;
         }
         if (System.currentTimeMillis() - session.verifiedAt() > VERIFIED_TTL_MS) {
-            verified.remove(key);
+            verified.remove(key, session);
             return null;
         }
         return session.mojangUuid();
+    }
+
+    /**
+     * Discards the verification stored for the given username, if any.
+     *
+     * @param username the username whose verification should be discarded
+     */
+    public void removeVerified(String username) {
+        verified.remove(username.toLowerCase(Locale.ROOT));
     }
 
     private byte[] rsaDecrypt(byte[] encrypted) throws GeneralSecurityException {

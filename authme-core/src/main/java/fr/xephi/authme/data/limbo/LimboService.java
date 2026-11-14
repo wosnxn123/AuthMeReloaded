@@ -3,6 +3,7 @@ package fr.xephi.authme.data.limbo;
 import fr.xephi.authme.ConsoleLogger;
 import fr.xephi.authme.data.limbo.persistence.LimboPersistence;
 import fr.xephi.authme.output.ConsoleLoggerFactory;
+import fr.xephi.authme.service.BukkitService;
 import fr.xephi.authme.service.TeleportationService;
 import fr.xephi.authme.settings.Settings;
 import fr.xephi.authme.settings.SpawnLoader;
@@ -21,6 +22,7 @@ import java.util.HashMap;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
@@ -38,7 +40,9 @@ public class LimboService {
 
     private final ConsoleLogger logger = ConsoleLoggerFactory.get(LimboService.class);
 
-    private final Map<String, LimboPlayer> entries = new ConcurrentHashMap<>();
+    private final Map<UUID, LimboPlayer> entries = new ConcurrentHashMap<>();
+
+    private final Set<UUID> pendingOperators = ConcurrentHashMap.newKeySet();
 
     @Inject
     private Settings settings;
@@ -61,6 +65,9 @@ public class LimboService {
     @Inject
     private TeleportationService teleportationService;
 
+    @Inject
+    private BukkitService bukkitService;
+
     LimboService() {
     }
 
@@ -78,7 +85,7 @@ public class LimboService {
             logger.debug("LimboPlayer for `{0}` already exists on disk", name);
         }
 
-        LimboPlayer existingLimbo = entries.remove(name);
+        LimboPlayer existingLimbo = entries.remove(player.getUniqueId());
         if (existingLimbo != null) {
             existingLimbo.clearTasks();
             logger.debug("LimboPlayer for `{0}` already present in memory", name);
@@ -86,7 +93,11 @@ public class LimboService {
 
         Location location = teleportationService.consumeOriginalJoinLocation(name, spawnLoader.getPlayerLocationOrSpawn(player));
         LimboPlayer limboPlayer = helper.merge(existingLimbo, limboFromDisk);
-        limboPlayer = helper.merge(helper.createLimboPlayer(player, isRegistered, location), limboPlayer);
+        boolean wasOperator = pendingOperators.remove(player.getUniqueId());
+        limboPlayer = helper.merge(helper.createLimboPlayer(player, isRegistered, location, wasOperator), limboPlayer);
+        if (!isRegistered) {
+            limboPlayer = helper.withoutOperator(limboPlayer);
+        }
 
         LimboMessageType messageType = isRegistered ? LimboMessageType.LOG_IN : LimboMessageType.REGISTER;
         taskManager.registerMessageTask(player, limboPlayer, messageType);
@@ -94,28 +105,53 @@ public class LimboService {
         helper.revokeLimboStates(player);
         authGroupHandler.setGroup(player, limboPlayer,
             isRegistered ? AuthGroupType.REGISTERED_UNAUTHENTICATED : AuthGroupType.UNREGISTERED);
-        entries.put(name, limboPlayer);
+        entries.put(player.getUniqueId(), limboPlayer);
         persistence.saveLimboPlayer(player, limboPlayer);
     }
 
     /**
-     * Returns the limbo player for the given name, or null otherwise.
+     * Revokes the OP status of a player who has just joined, before any of their packets is handled.
+     * The status is given back by {@link #createLimboPlayer} (kept in the limbo player) or by
+     * {@link #restorePendingOperator}.
      *
-     * @param name the name to retrieve the data for
-     * @return the associated limbo player, or null if none available
+     * @param player the player who joined
      */
-    public LimboPlayer getLimboPlayer(String name) {
-        return entries.get(name.toLowerCase(Locale.ROOT));
+    public void revokeOperatorOnJoin(Player player) {
+        if (player.isOp()) {
+            pendingOperators.add(player.getUniqueId());
+            player.setOp(false);
+        }
     }
 
     /**
-     * Returns whether there is a limbo player for the given name.
+     * Gives back the OP status revoked by {@link #revokeOperatorOnJoin} when no limbo player took it over.
      *
-     * @param name the name to check
+     * @param player the player to restore
+     */
+    public void restorePendingOperator(Player player) {
+        if (pendingOperators.remove(player.getUniqueId())) {
+            player.setOp(true);
+        }
+    }
+
+    /**
+     * Returns the limbo player of the given player, or null otherwise.
+     *
+     * @param player the player to retrieve the data for
+     * @return the associated limbo player, or null if none available
+     */
+    public LimboPlayer getLimboPlayer(Player player) {
+        return entries.get(player.getUniqueId());
+    }
+
+    /**
+     * Returns whether there is a limbo player for the given player.
+     *
+     * @param player the player to check
      * @return true if present, false otherwise
      */
-    public boolean hasLimboPlayer(String name) {
-        return entries.containsKey(name.toLowerCase(Locale.ROOT));
+    public boolean hasLimboPlayer(Player player) {
+        return entries.containsKey(player.getUniqueId());
     }
 
     /**
@@ -128,7 +164,7 @@ public class LimboService {
      */
     public void restoreData(Player player) {
         String lowerName = player.getName().toLowerCase(Locale.ROOT);
-        LimboPlayer limbo = entries.remove(lowerName);
+        LimboPlayer limbo = entries.remove(player.getUniqueId());
 
         if (limbo == null) {
             logger.debug("No LimboPlayer found for `{0}` - cannot restore", lowerName);
@@ -197,8 +233,7 @@ public class LimboService {
      * @param player the player whose speed should be restored
      */
     public void restoreSpeedSync(Player player) {
-        String lowerName = player.getName().toLowerCase(Locale.ROOT);
-        LimboPlayer limbo = entries.get(lowerName);
+        LimboPlayer limbo = entries.get(player.getUniqueId());
         if (limbo != null) {
             settings.getProperty(RESTORE_FLY_SPEED).restoreFlySpeed(player, limbo);
             settings.getProperty(RESTORE_WALK_SPEED).restoreWalkSpeed(player, limbo);
@@ -216,7 +251,7 @@ public class LimboService {
      * @param player the player to re-apply restrictions for
      */
     public void reapplyLimboRestrictions(Player player) {
-        if (hasLimboPlayer(player.getName())) {
+        if (hasLimboPlayer(player)) {
             helper.revokeLimboStates(player);
         }
     }
@@ -271,7 +306,7 @@ public class LimboService {
      * @return Optional with the limbo player
      */
     private Optional<LimboPlayer> getLimboOrLogError(Player player, String context) {
-        LimboPlayer limbo = entries.get(player.getName().toLowerCase(Locale.ROOT));
+        LimboPlayer limbo = entries.get(player.getUniqueId());
         if (limbo == null) {
             logger.debug("No LimboPlayer found for `{0}`. Action: {1}", player.getName(), context);
         }
@@ -289,7 +324,7 @@ public class LimboService {
     public void saveEnderPearlsForPlayer(Player player, Collection<EnderPearlRestoreData> pearls) {
         LimboPlayer limbo = persistence.getLimboPlayer(player);
         if (limbo == null) {
-            limbo = new LimboPlayer(null, player.isOp(), Collections.emptyList(), player.getAllowFlight(),
+            limbo = new LimboPlayer(null, false, Collections.emptyList(), player.getAllowFlight(),
                 player.getWalkSpeed(), player.getFlySpeed());
         }
         limbo.setEnderPearls(pearls);
@@ -322,7 +357,7 @@ public class LimboService {
     public void saveVehicleForPlayer(Player player, UUID vehicleUuid, EntityType vehicleType) {
         LimboPlayer limbo = persistence.getLimboPlayer(player);
         if (limbo == null) {
-            limbo = new LimboPlayer(null, player.isOp(), Collections.emptyList(), player.getAllowFlight(),
+            limbo = new LimboPlayer(null, false, Collections.emptyList(), player.getAllowFlight(),
                 player.getWalkSpeed(), player.getFlySpeed());
         }
         limbo.setVehicle(vehicleUuid, vehicleType);
@@ -339,8 +374,7 @@ public class LimboService {
      * @param player the player whose entities should be restored
      */
     public void restoreEntities(Player player) {
-        String name = player.getName().toLowerCase(Locale.ROOT);
-        LimboPlayer limbo = entries.get(name);
+        LimboPlayer limbo = entries.get(player.getUniqueId());
         if (limbo == null) {
             return;
         }
@@ -369,6 +403,9 @@ public class LimboService {
         outer:
         for (World world : player.getServer().getWorlds()) {
             for (Entity entity : world.getEntities()) {
+                if (!bukkitService.isOwnedByCurrentThread(entity)) {
+                    continue;
+                }
                 if (!pendingPearls.isEmpty() && entity instanceof EnderPearl
                         && pendingPearls.containsKey(entity.getUniqueId())) {
                     ((EnderPearl) entity).setShooter(player);
@@ -415,6 +452,11 @@ public class LimboService {
     private boolean recreateEnderPearl(Player player, EnderPearlRestoreData pearl) {
         if (!pearl.canBeRecreated()) {
             logger.debug("Unable to recreate ender pearl {0} for `{1}` because its saved location is unavailable",
+                pearl.getUuid(), player.getName().toLowerCase(Locale.ROOT));
+            return false;
+        }
+        if (!bukkitService.isOwnedByCurrentThread(pearl.getLocation())) {
+            logger.debug("Unable to recreate ender pearl {0} for `{1}` because its saved location is in another region",
                 pearl.getUuid(), player.getName().toLowerCase(Locale.ROOT));
             return false;
         }

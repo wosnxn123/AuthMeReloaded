@@ -45,6 +45,9 @@ public class AsyncChangePassword implements AsynchronousProcess {
     public void changePassword(Player player, String oldPassword, String newPassword) {
         String name = player.getName().toLowerCase(Locale.ROOT);
         PlayerAuth auth = playerCache.getAuth(name);
+        if (auth == null) {
+            return;
+        }
         if (passwordSecurity.comparePassword(oldPassword, auth.getPassword(), player.getName())) {
             HashedPassword hashedPassword = passwordSecurity.computeHash(newPassword, name);
             auth.setPassword(hashedPassword);
@@ -56,7 +59,7 @@ public class AsyncChangePassword implements AsynchronousProcess {
 
             // TODO: send an update when a messaging service will be implemented (PASSWORD_CHANGED)
 
-            playerCache.updatePlayer(auth);
+            playerCache.updatePlayerIfPresent(auth);
             commonService.send(player, MessageKey.PASSWORD_CHANGED_SUCCESS);
             logger.info(player.getName() + " changed his password");
         } else {

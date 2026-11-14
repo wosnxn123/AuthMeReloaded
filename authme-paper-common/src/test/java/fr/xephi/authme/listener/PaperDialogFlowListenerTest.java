@@ -1,9 +1,12 @@
 package fr.xephi.authme.listener;
 
+import ch.jalu.configme.properties.Property;
 import com.destroystokyo.paper.event.player.PlayerConnectionCloseEvent;
 import com.destroystokyo.paper.profile.PlayerProfile;
 import fr.xephi.authme.data.ProxySessionManager;
+import fr.xephi.authme.data.TempbanManager;
 import fr.xephi.authme.data.auth.PlayerCache;
+import fr.xephi.authme.data.captcha.LoginCaptchaManager;
 import fr.xephi.authme.message.MessageKey;
 import fr.xephi.authme.message.Messages;
 import fr.xephi.authme.platform.DialogInputSpec;
@@ -13,7 +16,9 @@ import fr.xephi.authme.process.register.RegisterSecondaryArgument;
 import fr.xephi.authme.process.register.RegistrationType;
 import fr.xephi.authme.data.auth.PlayerAuth;
 import fr.xephi.authme.security.crypts.HashedPassword;
+import fr.xephi.authme.security.PasswordSecurity;
 import fr.xephi.authme.datasource.DataSource;
+import fr.xephi.authme.service.BukkitService;
 import fr.xephi.authme.service.CommonService;
 import fr.xephi.authme.service.DialogWindowService;
 import fr.xephi.authme.service.PreJoinDialogService;
@@ -24,11 +29,14 @@ import fr.xephi.authme.settings.properties.PremiumSettings;
 import fr.xephi.authme.settings.properties.RegistrationSettings;
 import fr.xephi.authme.settings.properties.RestrictionSettings;
 import io.papermc.paper.connection.PlayerConfigurationConnection;
+import io.papermc.paper.dialog.Dialog;
 import io.papermc.paper.dialog.DialogResponseView;
 import io.papermc.paper.event.connection.configuration.AsyncPlayerConnectionConfigureEvent;
 import io.papermc.paper.event.player.PlayerCustomClickEvent;
 import fr.xephi.authme.platform.PaperDialogHelper;
 import net.kyori.adventure.audience.Audience;
+import org.bukkit.Bukkit;
+import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.junit.jupiter.api.Test;
@@ -42,6 +50,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.TimeUnit;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.is;
@@ -49,6 +58,8 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.BDDMockito.given;
+import static org.mockito.BDDMockito.willAnswer;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
@@ -140,6 +151,57 @@ public class PaperDialogFlowListenerTest {
     }
 
     @Test
+    public void shouldCountPreJoinLoginAttemptAndRejectWrongPassword() throws Exception {
+        PreJoinLoginSetup setup = new PreJoinLoginSetup();
+        given(setup.passwordSecurity.comparePassword("wrong", setup.auth.getPassword(), "Bobby")).willReturn(false);
+        given(setup.messages.retrieveSingle("Bobby", MessageKey.WRONG_PASSWORD)).willReturn("Wrong password!");
+
+        setup.listener.onPlayerCustomClick(setup.submitEvent("wrong"));
+
+        verify(setup.loginCaptchaManager).increaseLoginFailureCount("bobby");
+        verify(setup.tempbanManager).increaseCount("203.0.113.5", "bobby");
+        verify(setup.preJoinDialogService, never()).storePendingLoginPassword(anyLong(), anyString());
+        assertThat(setup.future.getNow("sentinel"), is("Wrong password!"));
+    }
+
+    @Test
+    public void shouldStorePasswordAndResetCountersForCorrectPreJoinLogin() throws Exception {
+        PreJoinLoginSetup setup = new PreJoinLoginSetup();
+        given(setup.passwordSecurity.comparePassword("hunter2", setup.auth.getPassword(), "Bobby")).willReturn(true);
+
+        setup.listener.onPlayerCustomClick(setup.submitEvent("hunter2"));
+
+        verify(setup.loginCaptchaManager).resetLoginFailureCount("bobby");
+        verify(setup.tempbanManager).resetCount("203.0.113.5", "bobby");
+        verify(setup.preJoinDialogService).storePendingLoginPassword(SESSION_ID, "hunter2");
+        assertThat(setup.future.getNow("sentinel"), is((String) null));
+    }
+
+    @Test
+    public void shouldNotCheckPreJoinPasswordWhenCaptchaIsRequired() throws Exception {
+        PreJoinLoginSetup setup = new PreJoinLoginSetup();
+        given(setup.loginCaptchaManager.isCaptchaRequired("bobby")).willReturn(true);
+
+        setup.listener.onPlayerCustomClick(setup.submitEvent("guess"));
+
+        verifyNoInteractions(setup.passwordSecurity, setup.bukkitService);
+        verify(setup.preJoinDialogService, never()).storePendingLoginPassword(anyLong(), anyString());
+        assertThat("player joins without a pending password and logs in through /login",
+            setup.future.getNow("sentinel"), is((String) null));
+    }
+
+    @Test
+    public void shouldNotCheckPreJoinPasswordWhenIpReachedTempbanThreshold() throws Exception {
+        PreJoinLoginSetup setup = new PreJoinLoginSetup();
+        given(setup.tempbanManager.shouldTempban("203.0.113.5")).willReturn(true);
+
+        setup.listener.onPlayerCustomClick(setup.submitEvent("guess"));
+
+        verifyNoInteractions(setup.passwordSecurity, setup.bukkitService);
+        assertThat(setup.future.getNow("sentinel"), is((String) null));
+    }
+
+    @Test
     public void shouldKickWhenPreJoinLoginIsCancelledAndSettingEnabled() throws Exception {
         PaperDialogFlowListener listener = new PaperDialogFlowListener();
         CommonService commonService = mock(CommonService.class);
@@ -161,6 +223,63 @@ public class PaperDialogFlowListenerTest {
 
         assertThat(future.isDone(), is(true));
         assertThat(future.getNow(null), is("Canceled!"));
+    }
+
+    @Test
+    public void shouldKickWhenPreJoinRecoveryIsSubmittedWithoutEmailAndSettingEnabled() throws Exception {
+        PaperDialogFlowListener listener = new PaperDialogFlowListener();
+        CommonService commonService = mock(CommonService.class);
+        Messages messages = mock(Messages.class);
+        PreJoinDialogService preJoinDialogService = mock(PreJoinDialogService.class);
+        setField(listener, "commonService", commonService);
+        setField(listener, "messages", messages);
+        setField(listener, "preJoinDialogService", preJoinDialogService);
+        given(commonService.getProperty(RegistrationSettings.PRE_JOIN_LOGIN_CANCEL_KICKS)).willReturn(true);
+        given(messages.retrieveSingle("Bobby", MessageKey.DIALOG_LOGIN_CANCELED)).willReturn("Canceled!");
+
+        CompletableFuture<String> future = new CompletableFuture<>();
+        PlayerConfigurationConnection connection = mockConnection("Bobby");
+        seedSession(listener, connection, "pendingLoginResponses", future);
+
+        listener.onPlayerCustomClick(recoverySubmitEvent(connection, " "));
+
+        assertThat(future.getNow("sentinel"), is("Canceled!"));
+        verify(preJoinDialogService, never()).storePendingRecoveryEmail(anyLong(), anyString());
+    }
+
+    @Test
+    public void shouldFallbackToPostJoinDialogWhenPreJoinRecoveryIsSubmittedWithoutEmail() throws Exception {
+        PaperDialogFlowListener listener = new PaperDialogFlowListener();
+        CommonService commonService = mock(CommonService.class);
+        PreJoinDialogService preJoinDialogService = mock(PreJoinDialogService.class);
+        setField(listener, "commonService", commonService);
+        setField(listener, "preJoinDialogService", preJoinDialogService);
+        given(commonService.getProperty(RegistrationSettings.PRE_JOIN_LOGIN_CANCEL_KICKS)).willReturn(false);
+
+        CompletableFuture<String> future = new CompletableFuture<>();
+        PlayerConfigurationConnection connection = mockConnection("Bobby");
+        seedSession(listener, connection, "pendingLoginResponses", future);
+
+        listener.onPlayerCustomClick(recoverySubmitEvent(connection, null));
+
+        assertThat(future.getNow("sentinel"), is((String) null));
+        verify(preJoinDialogService, never()).storePendingRecoveryEmail(anyLong(), anyString());
+    }
+
+    @Test
+    public void shouldStoreRecoveryEmailSubmittedInPreJoinDialog() throws Exception {
+        PaperDialogFlowListener listener = new PaperDialogFlowListener();
+        PreJoinDialogService preJoinDialogService = mock(PreJoinDialogService.class);
+        setField(listener, "preJoinDialogService", preJoinDialogService);
+
+        CompletableFuture<String> future = new CompletableFuture<>();
+        PlayerConfigurationConnection connection = mockConnection("Bobby");
+        seedSession(listener, connection, "pendingLoginResponses", future);
+
+        listener.onPlayerCustomClick(recoverySubmitEvent(connection, "bobby@example.org"));
+
+        verify(preJoinDialogService).storePendingRecoveryEmail(SESSION_ID, "bobby@example.org");
+        assertThat(future.getNow("sentinel"), is((String) null));
     }
 
     @Test
@@ -503,20 +622,166 @@ public class PaperDialogFlowListenerTest {
         given(gone.isConnected()).willReturn(false);
         PlayerConfigurationConnection live = mockConnection("Bobby");
         given(live.isConnected()).willReturn(true);
+        CompletableFuture<String> goneFuture = new CompletableFuture<>();
         CompletableFuture<String> liveFuture = new CompletableFuture<>();
         connectionSessions(listener).put(gone, SESSION_ID);
         connectionSessions(listener).put(live, SESSION_ID + 1);
-        pendingResponses(listener, "pendingLoginResponses").put(SESSION_ID, new CompletableFuture<>());
+        pendingResponses(listener, "pendingLoginResponses").put(SESSION_ID, goneFuture);
         pendingResponses(listener, "pendingLoginResponses").put(SESSION_ID + 1, liveFuture);
 
-        listener.onPlayerConnectionClose(new PlayerConnectionCloseEvent(
-            UUID.randomUUID(), "Bobby", InetAddress.getLoopbackAddress(), false));
+        setField(listener, "proxySessionManager", mock(ProxySessionManager.class));
+
+        try (var bukkit = mockStatic(Bukkit.class)) {
+            listener.onPlayerConnectionClose(new PlayerConnectionCloseEvent(
+                UUID.randomUUID(), "Bobby", InetAddress.getLoopbackAddress(), false));
+        }
 
         verify(preJoinDialogService).retireSession(SESSION_ID);
         verify(preJoinDialogService, never()).retireSession(SESSION_ID + 1);
         assertThat(connectionSessions(listener).containsKey(gone), is(false));
         assertThat(connectionSessions(listener).get(live), is(SESSION_ID + 1));
         assertThat(pendingResponses(listener, "pendingLoginResponses").get(SESSION_ID + 1), is(liveFuture));
+        assertThat("thread waiting on the closed connection must be released", goneFuture.isDone(), is(true));
+        assertThat(liveFuture.isDone(), is(false));
+    }
+
+    @Test
+    public void shouldDropQueuedProxyLoginWhenConnectionClosesBeforeJoin() throws Exception {
+        PaperDialogFlowListener listener = new PaperDialogFlowListener();
+        ProxySessionManager proxySessionManager = mock(ProxySessionManager.class);
+        setField(listener, "proxySessionManager", proxySessionManager);
+
+        try (var bukkit = mockStatic(Bukkit.class)) {
+            listener.onPlayerConnectionClose(new PlayerConnectionCloseEvent(
+                UUID.randomUUID(), "Bobby", InetAddress.getLoopbackAddress(), false));
+        }
+
+        verify(proxySessionManager).removeLoginRequest("Bobby");
+    }
+
+    @Test
+    public void shouldKeepQueuedProxyLoginWhenPlayerWithNameIsOnline() throws Exception {
+        PaperDialogFlowListener listener = new PaperDialogFlowListener();
+        ProxySessionManager proxySessionManager = mock(ProxySessionManager.class);
+        setField(listener, "proxySessionManager", proxySessionManager);
+
+        try (var bukkit = mockStatic(Bukkit.class)) {
+            bukkit.when(() -> Bukkit.getPlayerExact("Bobby")).thenReturn(mock(Player.class));
+            listener.onPlayerConnectionClose(new PlayerConnectionCloseEvent(
+                UUID.randomUUID(), "Bobby", InetAddress.getLoopbackAddress(), false));
+        }
+
+        verify(proxySessionManager, never()).removeLoginRequest(anyString());
+    }
+
+    @Test
+    public void shouldKeepPreJoinLoginDialogOpenWhenLoginTimeoutIsDisabled() throws Exception {
+        PaperDialogFlowListener listener = new PaperDialogFlowListener();
+        PreJoinDialogService preJoinDialogService = mock(PreJoinDialogService.class);
+        Audience audience = mock(Audience.class);
+        PlayerConfigurationConnection connection = newBlockingDialogSetup(listener, preJoinDialogService, audience);
+        setField(listener, "proxySessionManager", mock(ProxySessionManager.class));
+        setField(listener, "dialogWindowService", mock(DialogWindowService.class));
+        givenTimeout(listener, RestrictionSettings.LOGIN_TIMEOUT, 0);
+        givenDialogIsAnsweredLate(listener, audience, "pendingLoginResponses");
+
+        try (var helperStatic = mockStatic(PaperDialogHelper.class)) {
+            helperStatic.when(() -> PaperDialogHelper.createPreJoinLoginDialog(any())).thenReturn(null);
+
+            invokeHandleBlockingLoginDialog(listener, connection);
+        }
+
+        verify(preJoinDialogService, never()).storePendingKickMessage(anyLong(), anyString());
+    }
+
+    @Test
+    public void shouldKeepPreJoinRegisterDialogOpenWhenRegisterTimeoutIsDisabled() throws Exception {
+        PaperDialogFlowListener listener = new PaperDialogFlowListener();
+        PreJoinDialogService preJoinDialogService = mock(PreJoinDialogService.class);
+        Audience audience = mock(Audience.class);
+        PlayerConfigurationConnection connection = newBlockingDialogSetup(listener, preJoinDialogService, audience);
+        givenTimeout(listener, RestrictionSettings.REGISTER_TIMEOUT, 0);
+        givenDialogIsAnsweredLate(listener, audience, "pendingRegisterResponses");
+
+        invokeHandleBlockingRegisterDialog(listener, connection);
+
+        verify(preJoinDialogService, never()).storePendingKickMessage(anyLong(), anyString());
+    }
+
+    @Test
+    public void shouldKickWhenPreJoinLoginDialogTimesOut() throws Exception {
+        PaperDialogFlowListener listener = new PaperDialogFlowListener();
+        PreJoinDialogService preJoinDialogService = mock(PreJoinDialogService.class);
+        PlayerConfigurationConnection connection =
+            newBlockingDialogSetup(listener, preJoinDialogService, mock(Audience.class));
+        setField(listener, "proxySessionManager", mock(ProxySessionManager.class));
+        setField(listener, "dialogWindowService", mock(DialogWindowService.class));
+        givenTimeout(listener, RestrictionSettings.LOGIN_TIMEOUT, 1);
+
+        try (var helperStatic = mockStatic(PaperDialogHelper.class)) {
+            helperStatic.when(() -> PaperDialogHelper.createPreJoinLoginDialog(any())).thenReturn(null);
+
+            invokeHandleBlockingLoginDialog(listener, connection);
+        }
+
+        verify(preJoinDialogService).storePendingKickMessage(SESSION_ID, "Timed out!");
+    }
+
+    private static PlayerConfigurationConnection newBlockingDialogSetup(PaperDialogFlowListener listener,
+                                                                        PreJoinDialogService preJoinDialogService,
+                                                                        Audience audience) throws Exception {
+        Messages messages = mock(Messages.class);
+        setField(listener, "messages", messages);
+        setField(listener, "preJoinDialogService", preJoinDialogService);
+        given(messages.retrieveSingle("Bobby", MessageKey.LOGIN_TIMEOUT_ERROR)).willReturn("Timed out!");
+
+        PlayerConfigurationConnection connection = mockConnection("Bobby");
+        given(connection.getAudience()).willReturn(audience);
+        return connection;
+    }
+
+    private static void givenTimeout(PaperDialogFlowListener listener, Property<Integer> property,
+                                     int seconds) throws Exception {
+        CommonService commonService = mock(CommonService.class);
+        setField(listener, "commonService", commonService);
+        given(commonService.getProperty(property)).willReturn(seconds);
+    }
+
+    // The player answers after 1.2 seconds; a disabled timeout used to end the wait after one second
+    private static void givenDialogIsAnsweredLate(PaperDialogFlowListener listener, Audience audience,
+                                                  String responseField) {
+        willAnswer(invocation -> {
+            pendingResponses(listener, responseField).get(SESSION_ID)
+                .completeOnTimeout(null, 1200, TimeUnit.MILLISECONDS);
+            return null;
+        }).given(audience).showDialog(any());
+    }
+
+    private static void invokeHandleBlockingLoginDialog(PaperDialogFlowListener listener,
+                                                        PlayerConfigurationConnection connection) throws Exception {
+        Method method = PaperDialogFlowListener.class.getDeclaredMethod("handleBlockingLoginDialog",
+            PlayerConfigurationConnection.class, long.class, String.class);
+        method.setAccessible(true);
+        method.invoke(listener, connection, SESSION_ID, "Bobby");
+    }
+
+    private static void invokeHandleBlockingRegisterDialog(PaperDialogFlowListener listener,
+                                                           PlayerConfigurationConnection connection) throws Exception {
+        Method method = PaperDialogFlowListener.class.getDeclaredMethod("handleBlockingRegisterDialog",
+            PlayerConfigurationConnection.class, long.class, String.class, Dialog.class);
+        method.setAccessible(true);
+        method.invoke(listener, connection, SESSION_ID, "Bobby", null);
+    }
+
+    private static PlayerCustomClickEvent recoverySubmitEvent(PlayerConfigurationConnection connection,
+                                                              String email) {
+        DialogResponseView responseView = mock(DialogResponseView.class);
+        given(responseView.getText("email")).willReturn(email);
+        PlayerCustomClickEvent event = mock(PlayerCustomClickEvent.class);
+        given(event.getCommonConnection()).willReturn(connection);
+        given(event.getIdentifier()).willReturn(PaperDialogActionKeys.PRE_JOIN_RECOVERY_SUBMIT);
+        given(event.getDialogResponseView()).willReturn(responseView);
+        return event;
     }
 
     private static PlayerConfigurationConnection mockConnection(String playerName) {
@@ -553,5 +818,48 @@ public class PaperDialogFlowListenerTest {
         Field field = target.getClass().getDeclaredField(fieldName);
         field.setAccessible(true);
         field.set(target, value);
+    }
+
+    private static final class PreJoinLoginSetup {
+        final PaperDialogFlowListener listener = new PaperDialogFlowListener();
+        final Messages messages = mock(Messages.class);
+        final DataSource dataSource = mock(DataSource.class);
+        final PasswordSecurity passwordSecurity = mock(PasswordSecurity.class);
+        final PreJoinDialogService preJoinDialogService = mock(PreJoinDialogService.class);
+        final LoginCaptchaManager loginCaptchaManager = mock(LoginCaptchaManager.class);
+        final TempbanManager tempbanManager = mock(TempbanManager.class);
+        final BukkitService bukkitService = mock(BukkitService.class);
+        final PlayerAuth auth = PlayerAuth.builder().name("bobby")
+            .password(new HashedPassword("hash")).build();
+        final CompletableFuture<String> future = new CompletableFuture<>();
+        final PlayerConfigurationConnection connection = mockConnection("Bobby");
+
+        PreJoinLoginSetup() throws Exception {
+            setField(listener, "messages", messages);
+            setField(listener, "dataSource", dataSource);
+            setField(listener, "passwordSecurity", passwordSecurity);
+            setField(listener, "preJoinDialogService", preJoinDialogService);
+            setField(listener, "loginCaptchaManager", loginCaptchaManager);
+            setField(listener, "tempbanManager", tempbanManager);
+            setField(listener, "bukkitService", bukkitService);
+            lenient().when(dataSource.getAuth("bobby")).thenReturn(auth);
+            lenient().when(bukkitService.runTaskAsynchronously(any(Runnable.class))).thenAnswer(invocation -> {
+                invocation.<Runnable>getArgument(0).run();
+                return null;
+            });
+            given(connection.getClientAddress())
+                .willReturn(new InetSocketAddress(InetAddress.getByName("203.0.113.5"), 25565));
+            seedSession(listener, connection, "pendingLoginResponses", future);
+        }
+
+        PlayerCustomClickEvent submitEvent(String password) {
+            DialogResponseView responseView = mock(DialogResponseView.class);
+            given(responseView.getText("password")).willReturn(password);
+            PlayerCustomClickEvent event = mock(PlayerCustomClickEvent.class);
+            given(event.getCommonConnection()).willReturn(connection);
+            given(event.getIdentifier()).willReturn(PaperDialogActionKeys.PRE_JOIN_LOGIN_SUBMIT);
+            given(event.getDialogResponseView()).willReturn(responseView);
+            return event;
+        }
     }
 }

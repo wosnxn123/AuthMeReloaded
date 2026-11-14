@@ -107,7 +107,7 @@ public class ProcessSyncPlayerLogin implements SynchronousProcess {
         }
 
         final String name = player.getName().toLowerCase(Locale.ROOT);
-        final LimboPlayer limbo = limboService.getLimboPlayer(name);
+        final LimboPlayer limbo = limboService.getLimboPlayer(player);
 
         player.setNoDamageTicks(0);
 
@@ -116,6 +116,7 @@ public class ProcessSyncPlayerLogin implements SynchronousProcess {
             limboService.restoreEntities(player);
             limboService.restoreData(player);
         } else {
+            limboService.restorePendingOperator(player);
             limboService.restoreSpeedsForAutoLogin(player);
         }
 
@@ -124,6 +125,9 @@ public class ProcessSyncPlayerLogin implements SynchronousProcess {
         }
 
         final PlayerAuth auth = playerCache.getAuth(name);
+        if (auth == null) {
+            return;
+        }
 
         if (isFirstLogin) { // Save quit location before login teleport
             auth.setQuitLocation(player.getLocation());

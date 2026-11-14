@@ -1,6 +1,8 @@
 package fr.xephi.authme.service;
 
+import fr.xephi.authme.TestHelper;
 import fr.xephi.authme.data.auth.PlayerAuth;
+import fr.xephi.authme.data.auth.PlayerCache;
 import fr.xephi.authme.datasource.DataSource;
 import fr.xephi.authme.message.MessageKey;
 import fr.xephi.authme.message.Messages;
@@ -8,6 +10,7 @@ import fr.xephi.authme.service.bungeecord.BungeeSender;
 import fr.xephi.authme.settings.Settings;
 import fr.xephi.authme.settings.properties.PremiumSettings;
 import org.bukkit.entity.Player;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InjectMocks;
@@ -36,7 +39,7 @@ class ProxyLoginRequestValidatorTest {
     private DataSource dataSource;
 
     @Mock
-    private fr.xephi.authme.data.auth.PlayerCache playerCache;
+    private PlayerCache playerCache;
 
     @Mock
     private PendingPremiumCache pendingPremiumCache;
@@ -55,6 +58,11 @@ class ProxyLoginRequestValidatorTest {
 
     @Mock
     private Player player;
+
+    @BeforeAll
+    static void initLogger() {
+        TestHelper.setupLogger();
+    }
 
     @Test
     void shouldAcceptStoredPremiumUuidFromProxy() {

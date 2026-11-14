@@ -74,6 +74,7 @@ final class VelocityProxyBridge {
     private final Set<String> notifiedAuthServers = ConcurrentHashMap.newKeySet();
     private volatile Set<String> premiumUsernames = ConcurrentHashMap.newKeySet();
     private List<String> premiumListBuffer = new ArrayList<>();
+    private int expectedPremiumListChunk = -1;
     // Players with a pending premium verification (ran /premium but not yet confirmed via reconnect)
     private volatile Set<String> pendingPremiumUsernames = ConcurrentHashMap.newKeySet();
     private final VelocityPremiumVerificationManager premiumVerificationManager;
@@ -94,7 +95,8 @@ final class VelocityProxyBridge {
             new VelocityPremiumVerificationManager(logger,
                 this::requiresPremiumVerification, this::isPendingPremiumVerification,
                 this::clearPendingPremiumVerification,
-                () -> this.configuration.keepOfflineUuidCompatibility());
+                () -> this.configuration.keepOfflineUuidCompatibility(),
+                name -> proxyServer.getPlayer(name).isPresent());
         this.cacheFile = dataDirectory != null ? dataDirectory.resolve("premium_names.cache") : null;
         if (cacheFile != null) {
             loadPremiumNamesCache();
@@ -297,30 +299,49 @@ final class VelocityProxyBridge {
             premiumUsernames = newPremiumSet;
             logger.info("Premium list received from backend: {} premium player(s)", premiumUsernames.size());
         } else if (PREMIUM_LIST_CHUNK_MESSAGE.equals(parsedMessage.typeId())) {
-            String[] parts = parsedMessage.playerName().split(":", 3);
-            if (parts.length < 3) {
-                logger.warn("Malformed premium.list.chunk payload: {}", parsedMessage.playerName());
-                return;
-            }
-            if ("0".equals(parts[0])) {
-                premiumListBuffer = new ArrayList<>();
-            }
-            String csv = parts[2];
-            if (!csv.isEmpty()) {
-                for (String name : csv.split(",")) {
-                    if (!name.isEmpty()) {
-                        premiumListBuffer.add(normalizeName(name.trim()));
-                    }
+            handlePremiumListChunk(parsedMessage.playerName());
+        }
+    }
+
+    private synchronized void handlePremiumListChunk(String payload) {
+        String[] parts = payload.split(":", 3);
+        int sequence;
+        try {
+            sequence = parts.length < 3 ? -1 : Integer.parseInt(parts[0]);
+        } catch (NumberFormatException e) {
+            sequence = -1;
+        }
+        if (sequence < 0) {
+            logger.warn("Malformed premium.list.chunk payload: {}", payload);
+            return;
+        }
+        if (sequence == 0) {
+            premiumListBuffer = new ArrayList<>();
+            expectedPremiumListChunk = 0;
+        }
+        if (sequence != expectedPremiumListChunk) {
+            logger.warn("Discarding premium list: received chunk {} instead of {}", sequence, expectedPremiumListChunk);
+            premiumListBuffer = new ArrayList<>();
+            expectedPremiumListChunk = -1;
+            return;
+        }
+        ++expectedPremiumListChunk;
+        String csv = parts[2];
+        if (!csv.isEmpty()) {
+            for (String name : csv.split(",")) {
+                if (!name.isEmpty()) {
+                    premiumListBuffer.add(normalizeName(name.trim()));
                 }
             }
-            if ("1".equals(parts[1])) {
-                Set<String> newPremiumSet = ConcurrentHashMap.newKeySet();
-                newPremiumSet.addAll(premiumListBuffer);
-                premiumUsernames = newPremiumSet;
-                premiumListBuffer = new ArrayList<>();
-                logger.info("Premium list received from backend: {} premium player(s)", premiumUsernames.size());
-                savePremiumNamesAsync();
-            }
+        }
+        if ("1".equals(parts[1])) {
+            Set<String> newPremiumSet = ConcurrentHashMap.newKeySet();
+            newPremiumSet.addAll(premiumListBuffer);
+            premiumUsernames = newPremiumSet;
+            premiumListBuffer = new ArrayList<>();
+            expectedPremiumListChunk = -1;
+            logger.info("Premium list received from backend: {} premium player(s)", premiumUsernames.size());
+            savePremiumNamesAsync();
         }
     }
 
@@ -473,12 +494,12 @@ final class VelocityProxyBridge {
         if (authenticationStore.isAuthenticated(player)) {
             return;
         }
-        if (configuration.isAuthServer(event.getOriginalServer())) {
+        Optional<RegisteredServer> target = event.getResult().getServer();
+        if (target.isEmpty() || configuration.isAuthServer(target.get())) {
             return;
         }
 
-        String targetName = event.getResult().getServer()
-            .map(s -> s.getServerInfo().getName()).orElse("unknown");
+        String targetName = target.get().getServerInfo().getName();
         logger.debug("Blocking unauthenticated player {} from switching to server '{}'",
             player.getUsername(), targetName);
 
@@ -530,6 +551,11 @@ final class VelocityProxyBridge {
 
     void onDisconnect(DisconnectEvent event) {
         String normalizedName = normalizeName(event.getPlayer().getUsername());
+        Optional<Player> connectedPlayer = proxyServer.getPlayer(event.getPlayer().getUsername());
+        if (connectedPlayer.isPresent() && connectedPlayer.get() != event.getPlayer()) {
+            logger.debug("Keeping auth state for {}: a duplicate connection was closed", normalizedName);
+            return;
+        }
         if (pendingAutoLogins.containsKey(normalizedName)) {
             logger.debug("Cancelling pending auto-login for {} (player disconnected)", normalizedName);
         }
@@ -615,18 +641,18 @@ final class VelocityProxyBridge {
     }
 
     private void initiatePendingLogin(String normalizedName) {
-        pendingAutoLogins.put(normalizedName, new AtomicInteger(0));
-        scheduleRetry(normalizedName);
+        AtomicInteger attempts = new AtomicInteger(0);
+        pendingAutoLogins.put(normalizedName, attempts);
+        scheduleRetry(normalizedName, attempts);
     }
 
     private void cancelPendingLogin(String normalizedName) {
         pendingAutoLogins.remove(normalizedName);
     }
 
-    private void scheduleRetry(String normalizedName) {
+    private void scheduleRetry(String normalizedName, AtomicInteger attempts) {
         retryScheduler.schedule(() -> {
-            AtomicInteger attempts = pendingAutoLogins.get(normalizedName);
-            if (attempts == null) {
+            if (pendingAutoLogins.get(normalizedName) != attempts) {
                 return;
             }
             Optional<Player> playerOpt = proxyServer.getPlayer(normalizedName);
@@ -638,7 +664,7 @@ final class VelocityProxyBridge {
             Optional<ServerConnection> serverOpt = playerOpt.get().getCurrentServer();
             if (serverOpt.isEmpty()) {
                 logger.debug("Auto-login retry for {} deferred: no active server connection yet", normalizedName);
-                scheduleRetry(normalizedName);
+                scheduleRetry(normalizedName, attempts);
                 return;
             }
             int current = attempts.getAndIncrement();
@@ -653,7 +679,7 @@ final class VelocityProxyBridge {
             UUID verifiedPremiumUuid = premiumVerificationManager.getVerifiedPremiumUuid(normalizedName);
             serverOpt.get().sendPluginMessage(AUTHME_CHANNEL,
                 createPerformLoginMessage(normalizedName, verifiedPremiumUuid));
-            scheduleRetry(normalizedName);
+            scheduleRetry(normalizedName, attempts);
         }, 1, TimeUnit.SECONDS);
     }
 

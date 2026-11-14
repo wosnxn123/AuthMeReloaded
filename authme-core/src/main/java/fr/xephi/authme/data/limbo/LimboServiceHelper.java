@@ -42,11 +42,12 @@ class LimboServiceHelper {
      * @param player       the player to process
      * @param isRegistered whether the player is registered
      * @param location     the player location
+     * @param wasOperator  whether the player's OP status was revoked when joining
      * @return limbo player with the player's data
      */
-    LimboPlayer createLimboPlayer(Player player, boolean isRegistered, Location location) {
+    LimboPlayer createLimboPlayer(Player player, boolean isRegistered, Location location, boolean wasOperator) {
         // For safety reasons an unregistered player should not have OP status after registration
-        boolean isOperator = isRegistered && player.isOp();
+        boolean isOperator = isRegistered && (wasOperator || player.isOp());
         boolean flyEnabled = player.getAllowFlight();
         float walkSpeed = player.getWalkSpeed();
         if (walkSpeed <= 0.01f) {
@@ -120,6 +121,23 @@ class LimboServiceHelper {
         merged.setVehicle(vehicleUuid, vehicleType);
 
         return merged;
+    }
+
+    /**
+     * Returns the given limbo player without OP status, keeping all other data.
+     *
+     * @param limbo the limbo player
+     * @return the limbo player itself if it is not an operator, otherwise a copy that is not
+     */
+    LimboPlayer withoutOperator(LimboPlayer limbo) {
+        if (!limbo.isOperator()) {
+            return limbo;
+        }
+        LimboPlayer copy = new LimboPlayer(limbo.getLocation(), false, limbo.getGroups(), limbo.isCanFly(),
+            limbo.getWalkSpeed(), limbo.getFlySpeed());
+        copy.setEnderPearls(limbo.getEnderPearls());
+        copy.setVehicle(limbo.getVehicleUuid(), limbo.getVehicleType());
+        return copy;
     }
 
     private static Collection<EnderPearlRestoreData> mergeEnderPearls(LimboPlayer newLimbo, LimboPlayer oldLimbo) {

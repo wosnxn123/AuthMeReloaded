@@ -7,6 +7,7 @@ import fr.xephi.authme.data.auth.PlayerAuth;
 import fr.xephi.authme.data.auth.PlayerCache;
 import fr.xephi.authme.data.captcha.LoginCaptchaManager;
 import fr.xephi.authme.data.limbo.LimboMessageType;
+import fr.xephi.authme.data.limbo.LimboPlayer;
 import fr.xephi.authme.data.limbo.LimboPlayerState;
 import fr.xephi.authme.data.limbo.LimboService;
 import fr.xephi.authme.datasource.DataSource;
@@ -111,8 +112,13 @@ public class AsynchronousLogin implements AsynchronousProcess {
         PlayerAuth auth = getPlayerAuth(player);
         if (auth != null && checkPlayerInfo(player, auth, password)) {
             if (auth.getTotpKey() != null) {
+                LimboPlayer limbo = limboService.getLimboPlayer(player);
+                if (limbo == null) {
+                    service.send(player, MessageKey.LOGIN_MESSAGE);
+                    return;
+                }
                 limboService.resetMessageTask(player, LimboMessageType.TOTP_CODE);
-                limboService.getLimboPlayer(player.getName()).setState(LimboPlayerState.TOTP_REQUIRED);
+                limbo.setState(LimboPlayerState.TOTP_REQUIRED);
                 showTotpDialogIfEnabled(player);
                 // TODO #1141: Check if we should check limbo state before processing password
             } else {
@@ -386,6 +392,14 @@ public class AsynchronousLogin implements AsynchronousProcess {
             playerCache.updatePlayer(auth);
             dataSource.setLogged(name);
             sessionService.grantSession(name);
+
+            if (!player.isOnline()) {
+                playerCache.removePlayer(name);
+                dataSource.setUnlogged(name);
+                sessionService.revokeSession(name);
+                logger.warning("Player '" + name + "' quit during the login process, login reverted");
+                return;
+            }
 
             if (bungeeSender.isEnabled()) {
                 // As described at https://www.spigotmc.org/wiki/bukkit-bungee-plugin-messaging-channel/
